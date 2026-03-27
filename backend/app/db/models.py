@@ -2,9 +2,9 @@
 SQLAlchemy models for the Database Layer.
 
 Handles:
-- Conversations & Messages
+- Conversations & Messages (with external platform linking)
 - Documents & Chunks (with pgvector embeddings)
-- NER Graph (Entities & Relationships)
+- NER Entities (flat, per-conversation)
 - Verification Results / History
 """
 
@@ -21,6 +21,8 @@ from sqlalchemy import (
     Boolean,
     Enum,
     Integer,
+    UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -38,31 +40,60 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
+    
+    # External platform linking — supports ChatGPT, Claude, Gemini, DeepSeek, Copilot
+    external_id = Column(String(255), nullable=True, index=True)     # Platform's conversation ID
+    platform = Column(String(50), nullable=True, index=True)          # "chatgpt", "claude", "gemini", "deepseek", "copilot", "frontend"
+    title = Column(String(500), nullable=True)                        # Conversation title
+    external_url = Column(String(2048), nullable=True)                # Original URL (e.g., https://chatgpt.com/c/...)
+    
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Metadata about models used, tokens, etc.
+    # Metadata (models used, tokens, etc.)
     metadata_json = Column(JSONB, default=dict)
+    
+    # Track last processed message index for incremental NER
+    last_synced_message_index = Column(Integer, default=-1)
 
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at")
     documents = relationship("Document", back_populates="conversation")
     entities = relationship("ExtractedEntity", back_populates="conversation", cascade="all, delete-orphan")
-    relationships = relationship("EntityRelationship", back_populates="conversation", cascade="all, delete-orphan")
+
+    # Unique constraint: one conversation per (external_id, platform) pair
+    __table_args__ = (
+        UniqueConstraint("external_id", "platform", name="uq_conversation_external_platform"),
+    )
+
 
 class Message(Base):
     __tablename__ = "messages"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     conversation_id = Column(String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
-    role = Column(String(50), nullable=False) # 'user', 'assistant', 'system'
+    role = Column(String(50), nullable=False)  # 'user', 'assistant', 'system'
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    
+    # External platform tracking
+    external_id = Column(String(255), nullable=True)       # "user-8", "assistant-8" (from extension)
+    message_index = Column(Integer, nullable=True)          # Position in full conversation
+    role_index = Column(Integer, nullable=True)             # Nth message of this role
+    model_id = Column(String(100), nullable=True)           # Model that generated this (e.g., "chatgpt_extension")
+    
+    # Platform-provided source citations (web links in ChatGPT/Gemini responses)
+    platform_sources = Column(JSONB, default=list)          # [{type, url, title, host}]
     
     # If the message has an AI hallucination analysis result attached
     analysis_result_id = Column(String(36), ForeignKey("analysis_results.id", ondelete="SET NULL"), nullable=True)
 
     conversation = relationship("Conversation", back_populates="messages")
     analysis_result = relationship("AnalysisResult", back_populates="message", uselist=False, foreign_keys=[analysis_result_id])
+
+    # Unique constraint: one message per (conversation_id, external_id) pair
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "external_id", name="uq_message_conversation_external"),
+    )
 
 
 # ── Documents & Embeddings ───────────────────────────────────────────────
@@ -94,7 +125,7 @@ class DocumentChunk(Base):
     document = relationship("Document", back_populates="chunks")
 
 
-# ── NER Entity Graph (Relational representation) ─────────────────────────
+# ── NER Entities (flat, per-conversation) ────────────────────────────────
 class ExtractedEntity(Base):
     __tablename__ = "extracted_entities"
 
@@ -103,29 +134,11 @@ class ExtractedEntity(Base):
     name = Column(String(255), nullable=False)
     label = Column(String(100), nullable=False)  # ORG, PERSON, GPE, DATE, etc.
     
-    # E.g. what message it was extracted from
+    # What message it was extracted from
     source_message_id = Column(String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     conversation = relationship("Conversation", back_populates="entities")
-    # For back-reference
-    source_relations = relationship("EntityRelationship", foreign_keys="[EntityRelationship.source_entity_id]", back_populates="source_entity")
-    target_relations = relationship("EntityRelationship", foreign_keys="[EntityRelationship.target_entity_id]", back_populates="target_entity")
-
-class EntityRelationship(Base):
-    __tablename__ = "entity_relationships"
-
-    id = Column(String(36), primary_key=True, default=generate_uuid)
-    conversation_id = Column(String(36), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_entity_id = Column(String(36), ForeignKey("extracted_entities.id", ondelete="CASCADE"), nullable=False)
-    target_entity_id = Column(String(36), ForeignKey("extracted_entities.id", ondelete="CASCADE"), nullable=False)
-    relation_type = Column(String(255), nullable=False)  # e.g., "founder_of", "located_in"
-    evidence_text = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-
-    conversation = relationship("Conversation", back_populates="relationships")
-    source_entity = relationship("ExtractedEntity", foreign_keys=[source_entity_id], back_populates="source_relations")
-    target_entity = relationship("ExtractedEntity", foreign_keys=[target_entity_id], back_populates="target_relations")
 
 
 # ── Hallucination Detection Analysis ─────────────────────────────────────

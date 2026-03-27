@@ -53,6 +53,7 @@ class ClaimVerifier:
         ner_result: Optional[NERResult] = None,
         document_ids: Optional[list[str]] = None,
         config: Optional[dict] = None,
+        platform_sources: Optional[list] = None,
     ) -> list[ClaimVerificationResult]:
         """
         Verify a list of claims against multiple sources.
@@ -63,6 +64,7 @@ class ClaimVerifier:
             ner_result: NER extraction result for entity graph queries.
             document_ids: IDs of user-uploaded documents.
             config: Detection config overrides.
+            platform_sources: Web links parsed natively by extensions (e.g. from ChatGPT citations).
             
         Returns:
             List of ClaimVerificationResult for each claim.
@@ -94,6 +96,7 @@ class ClaimVerifier:
                     check_web=check_web,
                     check_conv=check_conv,
                     check_docs=check_docs,
+                    platform_sources=platform_sources,
                 )
             )
 
@@ -171,6 +174,7 @@ class ClaimVerifier:
         check_web: bool,
         check_conv: bool,
         check_docs: bool,
+        platform_sources: Optional[list] = None,
     ) -> tuple[list[EvidencePiece], list[SourceType]]:
         """
         Gather evidence from applicable sources for a single claim.
@@ -206,7 +210,25 @@ class ClaimVerifier:
             and self.web_searcher.client
             and SourceType.WEB_SEARCH in claim.suggested_sources
         )
-        if should_check_web:
+
+        has_direct_evidence = False
+        if platform_sources and hasattr(claim, "citation_indices") and claim.citation_indices:
+            # We have direct citations from ChatGPT!
+            direct_urls = []
+            for index in claim.citation_indices:
+                # find the source matching this index
+                matching_source = next((s for s in platform_sources if getattr(s, "index", None) == index), None)
+                if matching_source and matching_source.url:
+                    direct_urls.append(matching_source.url)
+            
+            for url in set(direct_urls):
+                logger.info(f"Direct citation match found for claim {claim.id}: {url}")
+                tasks.append(self.web_searcher.fetch_url_content(url))
+                source_keys.append(SourceType.WEB_SEARCH)
+                sources_checked.append(SourceType.WEB_SEARCH)
+                has_direct_evidence = True
+
+        if should_check_web and not has_direct_evidence:
             tasks.append(self.web_searcher.search_for_claim(
                 claim_text=claim.text,
                 search_queries=claim.search_queries,
@@ -238,6 +260,8 @@ class ClaimVerifier:
                 continue
             if isinstance(result, list):
                 all_evidence.extend(result)
+            elif result is not None:
+                all_evidence.append(result)
 
         return all_evidence, sources_checked
 
@@ -298,10 +322,14 @@ class ClaimVerifier:
     ) -> ClaimVerificationResult:
         """Build a ClaimVerificationResult from evidence and NLI scores."""
         if not evidence:
+            is_blocked_url = False
+            if hasattr(claim, "citation_indices") and claim.citation_indices and SourceType.WEB_SEARCH in sources_checked:
+                is_blocked_url = True
+
             return ClaimVerificationResult(
                 claim=claim,
-                risk_score=65.0,  # High risk if no evidence found
-                status=ClaimStatus.UNVERIFIED,
+                risk_score=60.0 if is_blocked_url else 65.0,  # Slightly lower risk for unreachable URLs
+                status=ClaimStatus.UNVERIFIABLE_SOURCE if is_blocked_url else ClaimStatus.UNVERIFIED,
                 sources_checked=sources_checked,
                 source_coverage=0.0,
             )

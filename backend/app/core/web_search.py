@@ -115,6 +115,38 @@ class WebSearcher:
         logger.info(f"Web search returned {len(all_evidence)} evidence pieces")
         return all_evidence[:max_results]
 
+    async def fetch_url_content(self, url: str) -> Optional[EvidencePiece]:
+        """Directly fetch a URL using HTTPX and strip HTML tags."""
+        import re
+        try:
+            async with httpx.AsyncClient(verify=False) as client:
+                response = await client.get(
+                    url, 
+                    timeout=10.0, 
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Verifier/1.0"}
+                )
+                response.raise_for_status()
+                text = response.text
+                
+                # Rudimentary HTML strip
+                clean_text = re.sub(r'<style.*?>.*?</style>', '', text, flags=re.IGNORECASE|re.DOTALL)
+                clean_text = re.sub(r'<script.*?>.*?</script>', '', clean_text, flags=re.IGNORECASE|re.DOTALL)
+                clean_text = re.sub(r'<[^>]+>', ' ', clean_text).strip()
+                clean_text = re.sub(r'\s+', ' ', clean_text)
+                
+                if len(clean_text) < 50:
+                    return None
+                    
+                return EvidencePiece(
+                    source_type=SourceType.WEB_SEARCH,
+                    source_url=url,
+                    source_title=url.split("//")[-1].split("/")[0],
+                    snippet=clean_text[:5000],  # Keep first 5000 chars for NLI
+                )
+        except Exception as e:
+            logger.warning(f"Direct URL fetch failed for {url}: {e}")
+            return None
+
 
 # ── Module-level singleton ────────────────────────────────────────────────
 

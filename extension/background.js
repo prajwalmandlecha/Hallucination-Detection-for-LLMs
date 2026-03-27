@@ -1,7 +1,7 @@
 importScripts("highlight-normalizer.js");
 
-const BACKEND_CHAT_URL = "";
-const BACKEND_ATTACHMENT_URL = "http://127.0.0.1:5051/upload";
+const BACKEND_CHAT_URL = "http://127.0.0.1:8000/api/v1/detect";
+const BACKEND_ATTACHMENT_URL = "http://127.0.0.1:8000/api/v1/documents/upload";
 const EXTENSION_BUILD_TAG = "multi-platform-v3";
 const CHAT_SYNC_STORAGE_PREFIX = "chat_sync_state::";
 
@@ -126,6 +126,16 @@ function buildIncrementalChatPayload(payload, syncState, conversationKey) {
   };
 }
 
+function isEmptyBackendDetectionResponse(responseBody) {
+  if (!responseBody || typeof responseBody !== "object") {
+    return true;
+  }
+
+  const claims = Array.isArray(responseBody?.claims) ? responseBody.claims : [];
+  const results = Array.isArray(responseBody?.results) ? responseBody.results : [];
+  return claims.length === 0 && results.length === 0;
+}
+
 // ── File upload to Express server ─────────────────────────────────────────────
 
 async function uploadAttachmentToBackend(uploadRequest) {
@@ -244,12 +254,7 @@ async function sendChatPayloadToBackend(payload, platform) {
   console.log(label, preparedPayload.payload);
 
   if (!preparedPayload.payload.messages.length) {
-    return {
-      attempted: false,
-      reason: "No new messages were found for this conversation.",
-      sync: preparedPayload.payload.incrementalSync,
-      preparedPayload: preparedPayload.payload
-    };
+    console.log("[AI Chat Extractor] No new messages for this conversation, checking for past validations...");
   }
 
   if (!BACKEND_CHAT_URL) {
@@ -273,6 +278,62 @@ async function sendChatPayloadToBackend(payload, platform) {
 
     let responseBody = null;
     try { responseBody = await response.json(); } catch { /* noop */ }
+
+    const hasNoNewMessages = !preparedPayload.payload.messages.length;
+    const hasExtractedMessages = Array.isArray(payload?.messages) && payload.messages.length > 0;
+    const shouldForceFullResync =
+      response.ok &&
+      hasNoNewMessages &&
+      hasExtractedMessages &&
+      isEmptyBackendDetectionResponse(responseBody);
+
+    if (shouldForceFullResync) {
+      console.warn(
+        "[AI Chat Extractor] Backend returned empty history for zero-delta sync; retrying with full conversation payload.",
+        {
+          platform,
+          conversationKey,
+          incrementalSync: preparedPayload.payload.incrementalSync
+        }
+      );
+
+      const forcedFullSync = buildIncrementalChatPayload(payload, null, conversationKey);
+      const recoveryPayload = {
+        ...forcedFullSync.payload,
+        incrementalSync: {
+          ...forcedFullSync.payload.incrementalSync,
+          recoveryMode: "force_full_resync"
+        }
+      };
+
+      const recoveryResponse = await fetch(BACKEND_CHAT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(recoveryPayload)
+      });
+
+      let recoveryBody = null;
+      try { recoveryBody = await recoveryResponse.json(); } catch { /* noop */ }
+
+      if (recoveryResponse.ok) {
+        await setConversationSyncState(conversationKey, forcedFullSync.nextSyncState);
+      }
+
+      return {
+        attempted: true,
+        ok: recoveryResponse.ok,
+        status: recoveryResponse.status,
+        response: recoveryBody,
+        sync: recoveryPayload.incrementalSync,
+        preparedPayload: recoveryPayload,
+        fallbackTriggered: true,
+        initialAttempt: {
+          status: response.status,
+          response: responseBody,
+          sync: preparedPayload.payload.incrementalSync
+        }
+      };
+    }
 
     if (response.ok) {
       await setConversationSyncState(conversationKey, preparedPayload.nextSyncState);
@@ -330,7 +391,7 @@ async function logDebugPayloadInTab(tabId, label, payload) {
 
 // ── Extension icon click: full extract → sync → highlight pipeline ─────────────
 
-chrome.action.onClicked.addListener(async (tab) => {
+async function runExtractionForTab(tab) {
   if (!tab?.id) {
     console.warn("[AI Chat Extractor] No active tab id found.");
     return;
@@ -366,5 +427,20 @@ chrome.action.onClicked.addListener(async (tab) => {
     console.log(`[AI Chat Extractor][${platform}] JSON:\n` + JSON.stringify(payload, null, 2));
   } catch (error) {
     console.error(`[AI Chat Extractor] Extraction failed for platform '${platform}':`, error);
+  }
+}
+
+chrome.action.onClicked.addListener(runExtractionForTab);
+
+// Auto-run when a user navigates to an existing page or refreshes.
+const debounceTimers = {};
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" || changeInfo.url) {
+    if (debounceTimers[tabId]) clearTimeout(debounceTimers[tabId]);
+    debounceTimers[tabId] = setTimeout(() => {
+      if (tab.url && getSupportedPlatform(tab.url)) {
+        runExtractionForTab(tab);
+      }
+    }, 2500); // 2.5 second delay allows SPA frameworks (like Next.js on ChatGPT) to finish manipulating the DOM
   }
 });

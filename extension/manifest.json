@@ -16,8 +16,8 @@
     "https://chat.deepseek.com/*",
     "https://copilot.microsoft.com/*",
     "https://www.bing.com/*",
-    "http://127.0.0.1:5051/*",
-    "http://localhost:5051/*"
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
   ],
   "content_scripts": [
     {

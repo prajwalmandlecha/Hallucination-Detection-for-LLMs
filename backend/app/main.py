@@ -180,7 +180,7 @@ async def health_check():
 
 @app.get("/api/v1/models", tags=["System"])
 async def list_models():
-    """List all supported LLM models."""
+    """List all available LLM models (only those with configured API keys)."""
     settings = get_settings()
     models = []
     for model_id, info in settings.supported_models.items():
@@ -189,12 +189,13 @@ async def list_models():
             api_key_field is None
             or getattr(settings, api_key_field, None) is not None
         )
+        if not is_available:
+            continue
         models.append({
             "id": model_id,
             "name": info["name"],
             "provider": info["provider"],
             "tier": info["tier"],
-            "available": is_available,
             "description": info.get("description", ""),
         })
     return {"models": models}

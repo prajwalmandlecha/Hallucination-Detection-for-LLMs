@@ -170,7 +170,7 @@
       }
       items.push(...collectHighlightEntries(container, targetHints));
 
-      for (const key of ["data", "result"]) {
+      for (const key of ["data", "result", "results"]) {
         if (container[key] && typeof container[key] === "object") {
           visit(container[key], targetHints);
         }
@@ -257,7 +257,7 @@
   // Builds the final DOM highlighter payload from backend output plus extracted chat data.
   function buildHighlightPayloadFromBackend(backendResult, extractedConversation) {
     if (!backendResult?.ok || !backendResult.response) {
-      return [];
+      return { items: [], summary: null };
     }
 
     const assistantMessages = (extractedConversation?.messages || []).filter(
@@ -269,7 +269,7 @@
 
     for (const item of rawItems) {
       const statement = normalizeComparisonText(
-        item?.statement || item?.claim || item?.sentence || item?.text || item?.content || ""
+        item?.exact_quote || item?.statement || item?.claim || item?.sentence || item?.text || item?.content || ""
       );
 
       if (!statement) {
@@ -282,6 +282,7 @@
       }
 
       const score =
+        item?.risk_score ??
         item?.score ??
         item?.riskScore ??
         item?.risk ??
@@ -289,6 +290,8 @@
         item?.confidence ??
         item?.probability ??
         "N/A";
+
+      const status = item?.status || "UNVERIFIED";
 
       const note = normalizeComparisonText(
         item?.note ||
@@ -301,6 +304,12 @@
 
       const citations = normalizeCitations(item);
 
+      const type = item?.type || "factual";
+      const entailment_score = item?.verification_details?.entailment_score ?? null;
+      const contradiction_score = item?.verification_details?.contradiction_score ?? null;
+      const neutral_score = item?.verification_details?.neutral_score ?? null;
+      const sources_checked = item?.verification_details?.sources_checked || [];
+
       for (const assistantRoleIndex of targetIndices) {
         const dedupeKey = `${assistantRoleIndex}::${statement.toLowerCase()}`;
         if (seen.has(dedupeKey)) {
@@ -312,13 +321,30 @@
           assistantRoleIndex,
           statement,
           score: String(score),
+          status: status,
+          type: type,
+          entailment_score: entailment_score,
+          contradiction_score: contradiction_score,
+          neutral_score: neutral_score,
+          sources_checked: sources_checked.join(", "),
           citations,
           note
         });
       }
     }
 
-    return highlightItems;
+    const summary = {
+      score: backendResult.response.overall_risk_score ?? "N/A",
+      level: backendResult.response.risk_level || "UNKNOWN",
+      color: backendResult.response.risk_color || "#9CA3AF",
+      message: backendResult.response.warning_message || "No warnings detected."
+    };
+
+    return {
+      items: highlightItems,
+      summary: summary,
+      message_results: backendResult.response.results || []
+    };
   }
 
   globalScope.HighlightNormalizer = {

@@ -1,13 +1,5 @@
 """
 LLM-powered claim extraction from AI responses.
-
-Uses Groq (Llama 3.3 70B) for claim extraction — the fastest free option:
-- ~500 tokens/sec on Groq's LPU hardware
-- 30 RPM, 14,400 RPD on free tier
-- OpenAI-compatible API with JSON mode
-- 70B parameters = smart enough for precise claim decomposition
-
-Falls back to Google Gemini or NVIDIA NIM if Groq is unavailable.
 """
 
 import json
@@ -32,15 +24,17 @@ CLAIM_EXTRACTION_PROMPT = """You are a precise claim extraction system. Your job
 
 ## Instructions
 
-1. Extract each factual claim as a **standalone assertion** that can be verified independently. 
-2. Do NOT extract opinions, subjective statements, or hedged language ("might", "could", "it's possible").
-3. DO extract: facts, statistics, dates, names, definitions, causal claims, comparisons.
-4. Classify each claim by type: factual, statistical, temporal, causal, or definition.
-5. Rate the importance of each claim (0-1): how critical is this claim to the overall response?
-6. Rate the confidence that this claim needs checking (0-1): how likely is it to be hallucinated?
-7. Suggest which verification sources to check: web_search, conversation_history, vector_db.
-8. Suggest specific search queries for web verification.
-9. List key entities (names, places, organizations, numbers) in each claim.
+1. Extract each factual claim as a **standalone assertion** that can be verified independently (stored in "text"). 
+2. **CRITICAL**: For every claim, you MUST extract the exact, strictly matching verbal substring from the AI's response that corresponds to this claim (stored in "exact_quote"). This will be used for exact text highlighting in the UI.
+3. Do NOT extract opinions, subjective statements, or hedged language ("might", "could", "it's possible").
+4. DO extract: facts, statistics, dates, names, definitions, causal claims, comparisons.
+5. Classify each claim by type: factual, statistical, temporal, causal, or definition.
+6. Rate the importance of each claim (0-1): how critical is this claim to the overall response?
+7. Rate the confidence that this claim needs checking (0-1): how likely is it to be hallucinated?
+8. Suggest which verification sources to check: web_search, conversation_history, vector_db.
+9. Suggest specific search queries for web verification.
+10. Extract any numerical citation indices (e.g., [1], [2]) that the AI embedded in the text related to this claim into `citation_indices` (as a list of integers).
+11. List key entities (names, places, organizations, numbers) in each claim.
 
 ## Important Source Suggestion Rules
 - Suggest "web_search" for any factual/statistical/temporal claim about the real world
@@ -56,6 +50,8 @@ Return ONLY valid JSON with this exact structure:
     {
       "id": "c1",
       "text": "The exact factual claim as a standalone assertion",
+      "exact_quote": "The exact verbatim phrase from the original response (e.g. 'Most recent research (2024–2026) focuses on making AI more capable...')",
+      "citation_indices": [1, 2],
       "type": "factual",
       "importance": 0.8,
       "suggested_sources": ["web_search"],
@@ -74,18 +70,18 @@ If the response contains no verifiable factual claims, return: {"claims": []}
 
 EXTRACTION_PROVIDERS = [
     {
-        "name": "groq",
-        "base_url": "https://api.groq.com/openai/v1",
-        "api_key_field": "groq_api_key",
-        "model": "llama-3.3-70b-versatile",
-        "description": "Groq Llama 3.3 70B — fastest free option (~500 tok/s)",
-    },
-    {
         "name": "nvidia",
         "base_url": "https://integrate.api.nvidia.com/v1",
         "api_key_field": "nvidia_api_key",
         "model": "meta/llama-3.1-70b-instruct",
         "description": "NVIDIA NIM Llama 3.1 70B — 1000 free credits",
+    },
+    {
+        "name": "groq",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_field": "groq_api_key",
+        "model": "llama-3.3-70b-versatile",
+        "description": "Groq Llama 3.3 70B — fastest free option (~500 tok/s)",
     },
     {
         "name": "openrouter",
@@ -237,11 +233,17 @@ class ClaimExtractor:
 
     def _parse_response(self, response_text: str) -> list[ExtractedClaim]:
         """Parse the JSON response into ExtractedClaim objects."""
+        import re
         try:
             text = response_text.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1]
-                text = text.rsplit("```", 1)[0]
+            
+            # Isolate the JSON object from potential markdown wrapping or conversational prefixes
+            match = re.search(r'(\{.*\})', text, re.DOTALL)
+            if match:
+                text = match.group(1)
+                
+            # Automatically strip trailing commas (common LLM hallucination) before closing brackets
+            text = re.sub(r',\s*([}\]])', r'\1', text)
             
             data = json.loads(text)
             claims_data = data.get("claims", [])
@@ -252,6 +254,8 @@ class ClaimExtractor:
                     claim = ExtractedClaim(
                         id=item.get("id", f"c{i + 1}"),
                         text=item.get("text", ""),
+                        exact_quote=item.get("exact_quote"),
+                        citation_indices=item.get("citation_indices", []),
                         type=self._parse_claim_type(item.get("type", "factual")),
                         importance=float(item.get("importance", 0.5)),
                         suggested_sources=self._parse_sources(item.get("suggested_sources", [])),
