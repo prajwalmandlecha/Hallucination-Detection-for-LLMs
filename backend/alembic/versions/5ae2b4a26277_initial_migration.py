@@ -67,6 +67,7 @@ def upgrade() -> None:
     sa.Column('role', sa.String(length=50), nullable=False),
     sa.Column('content', sa.Text(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('metadata_json', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('analysis_result_id', sa.String(length=36), nullable=True),
     sa.ForeignKeyConstraint(['analysis_result_id'], ['analysis_results.id'], ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['conversation_id'], ['conversations.id'], ondelete='CASCADE'),

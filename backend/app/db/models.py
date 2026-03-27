@@ -57,6 +57,7 @@ class Message(Base):
     role = Column(String(50), nullable=False) # 'user', 'assistant', 'system'
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    metadata_json = Column(JSONB, default=dict)
     
     # If the message has an AI hallucination analysis result attached
     analysis_result_id = Column(String(36), ForeignKey("analysis_results.id", ondelete="SET NULL"), nullable=True)
