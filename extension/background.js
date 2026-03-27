@@ -457,6 +457,290 @@ function extractChatGptConversationFromPage() {
     }
   }
 
+  function collectCanvasItems(node, baseText) {
+    const scope = getMessageScope(node);
+    const lowerBaseText = normalizeText(baseText).toLowerCase();
+
+    return Array.from(scope.querySelectorAll("canvas"))
+      .map((canvas, index) => {
+        const rawCandidates = [
+          canvas.getAttribute("aria-label"),
+          canvas.getAttribute("aria-description"),
+          canvas.getAttribute("title"),
+          canvas.getAttribute("alt"),
+          canvas.textContent,
+          canvas.closest("figure")?.querySelector("figcaption")?.textContent,
+          canvas.previousElementSibling?.textContent,
+          canvas.nextElementSibling?.textContent
+        ];
+
+        const textCandidates = Array.from(
+          new Set(
+            rawCandidates
+              .map((value) => normalizeText(value))
+              .filter(
+                (value) =>
+                  value &&
+                  value.length <= 300 &&
+                  (!lowerBaseText || !lowerBaseText.includes(value.toLowerCase()))
+              )
+          )
+        );
+
+        const text = normalizeText(textCandidates.join(" | ")) || null;
+        const width = Number.isFinite(canvas.width) ? canvas.width : null;
+        const height = Number.isFinite(canvas.height) ? canvas.height : null;
+        const dataTestId = normalizeText(canvas.getAttribute("data-testid") || "") || null;
+
+        if (!text && !width && !height && !dataTestId) {
+          return null;
+        }
+
+        return {
+          index,
+          type: "canvas",
+          text,
+          width,
+          height,
+          dataTestId
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function buildCanvasAppendix(canvasItems) {
+    if (!canvasItems.length) {
+      return null;
+    }
+
+    return normalizeText(
+      canvasItems
+        .map((canvasItem) => {
+          const parts = [];
+
+          if (canvasItem.text) {
+            parts.push(canvasItem.text);
+          }
+
+          if (canvasItem.width || canvasItem.height) {
+            parts.push(
+              `size ${canvasItem.width || "unknown"}x${canvasItem.height || "unknown"}`
+            );
+          }
+
+          if (!parts.length) {
+            parts.push("canvas content present");
+          }
+
+          return `[Canvas ${canvasItem.index + 1}] ${parts.join(" | ")}`;
+        })
+        .join("\n")
+    );
+  }
+
+  function isVisibleElement(element) {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    const style = window.getComputedStyle(element);
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0"
+    );
+  }
+
+  function getCanvasDocumentTitle(element) {
+    return (
+      normalizeText(
+        element.getAttribute("aria-label") ||
+          element.getAttribute("title") ||
+          element.getAttribute("data-testid") ||
+          element.closest("[aria-label]")?.getAttribute("aria-label") ||
+          element.closest("section, aside, div")?.querySelector("h1, h2, h3")?.textContent ||
+          ""
+      ) || null
+    );
+  }
+
+  function isLikelyCanvasDocumentElement(element, text) {
+    if (!(element instanceof HTMLElement) || !text) {
+      return false;
+    }
+
+    if (!isVisibleElement(element)) {
+      return false;
+    }
+
+    if (element.closest("[data-message-author-role]")) {
+      return false;
+    }
+
+    if (element.matches("textarea, input, button")) {
+      return false;
+    }
+
+    if (element.closest("form")) {
+      return false;
+    }
+
+    const descriptor = normalizeText(
+      [
+        element.tagName,
+        element.className,
+        element.getAttribute("data-testid"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("role")
+      ].join(" ")
+    ).toLowerCase();
+
+    const hasCanvasHint =
+      descriptor.includes("canvas") ||
+      descriptor.includes("prosemirror") ||
+      descriptor.includes("editor") ||
+      descriptor.includes("document");
+
+    const hasStructuredText = text.length >= 80 && /[\n\t]/.test(text);
+
+    return hasCanvasHint || (element.isContentEditable && hasStructuredText);
+  }
+
+  function collectCanvasDocumentsFromRoot(rootNode, source) {
+    const selectors = [
+      "[data-testid*='canvas' i]",
+      "[aria-label*='canvas' i]",
+      "[class*='canvas' i]",
+      ".ProseMirror",
+      "[contenteditable='true']",
+      "[role='textbox']"
+    ];
+    const candidates = Array.from(rootNode.querySelectorAll(selectors.join(",")));
+    const documents = [];
+    const seen = new Set();
+
+    for (const element of candidates) {
+      if (!(element instanceof HTMLElement)) {
+        continue;
+      }
+
+      const text = normalizeText(element.innerText || element.textContent || "");
+      if (!isLikelyCanvasDocumentElement(element, text)) {
+        continue;
+      }
+
+      const dedupeKey = text.toLowerCase();
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+
+      seen.add(dedupeKey);
+      documents.push({
+        index: documents.length,
+        type: "canvas_document",
+        source,
+        title: getCanvasDocumentTitle(element),
+        text
+      });
+    }
+
+    return documents;
+  }
+
+  function collectPageCanvasDocuments() {
+    const documents = collectCanvasDocumentsFromRoot(document, "document");
+
+    for (const iframe of Array.from(document.querySelectorAll("iframe"))) {
+      try {
+        const iframeDocument = iframe.contentDocument;
+        if (!iframeDocument) {
+          continue;
+        }
+
+        const iframeDocuments = collectCanvasDocumentsFromRoot(iframeDocument, "iframe");
+        for (const item of iframeDocuments) {
+          documents.push({
+            ...item,
+            index: documents.length
+          });
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    const seen = new Set();
+    return documents.filter((item) => {
+      const dedupeKey = item.text.toLowerCase();
+      if (seen.has(dedupeKey)) {
+        return false;
+      }
+
+      seen.add(dedupeKey);
+      return true;
+    });
+  }
+
+  function resolveCanvasTargetMessage(messages, pageCanvasDocuments) {
+    if (!pageCanvasDocuments.length) {
+      return null;
+    }
+
+    const assistantMessages = messages.filter((message) => message.role === "assistant");
+    if (!assistantMessages.length) {
+      return null;
+    }
+
+    const explicitCanvasMessage = [...assistantMessages]
+      .reverse()
+      .find((message) => /\bcanvas\b/i.test(message.text));
+
+    return explicitCanvasMessage || assistantMessages[assistantMessages.length - 1];
+  }
+
+  function appendCanvasDocumentsToMessage(message, pageCanvasDocuments) {
+    if (!message || !pageCanvasDocuments.length) {
+      return message;
+    }
+
+    const canvasItems = [
+      ...(Array.isArray(message.canvasItems) ? message.canvasItems : []),
+      ...pageCanvasDocuments.map((item, index) => ({
+        ...item,
+        index: (message.canvasItems || []).length + index
+      }))
+    ];
+    const canvasAppendix = normalizeText(
+      pageCanvasDocuments
+        .map((item) =>
+          normalizeText(
+            `[Canvas Document ${item.index + 1}]${item.title ? ` ${item.title}` : ""}\n${item.text}`
+          )
+        )
+        .join("\n\n")
+    );
+    const text = normalizeText([message.text, canvasAppendix].filter(Boolean).join("\n\n")) || null;
+
+    return {
+      ...message,
+      text,
+      canvasItems,
+      canvasCount: canvasItems.length
+    };
+  }
+
+  function extractMessageContent(node) {
+    const baseText = extractMessageText(node) || "";
+    const canvasItems = collectCanvasItems(node, baseText);
+    const canvasAppendix = buildCanvasAppendix(canvasItems);
+    const text = normalizeText([baseText, canvasAppendix].filter(Boolean).join("\n\n")) || null;
+
+    return {
+      text,
+      canvasItems
+    };
+  }
+
   function unwrapExternalUrl(rawHref) {
     try {
       const parsedUrl = new URL(rawHref, window.location.href);
@@ -661,7 +945,7 @@ function extractChatGptConversationFromPage() {
         const roleIndex = roleCounts[role] ?? 0;
         roleCounts[role] = roleIndex + 1;
 
-        const text = extractMessageText(node);
+        const { text, canvasItems } = extractMessageContent(node);
 
         if (!text) {
           return null;
@@ -673,13 +957,22 @@ function extractChatGptConversationFromPage() {
           role,
           roleIndex,
           text,
+          canvasItems,
+          canvasCount: canvasItems.length,
           webSources: role === "assistant" ? collectSources(node) : []
         };
       })
       .filter(Boolean);
   }
 
-  const baseMessages = extractMessages();
+  const pageCanvasDocuments = collectPageCanvasDocuments();
+  const extractedMessages = extractMessages();
+  const canvasTargetMessage = resolveCanvasTargetMessage(extractedMessages, pageCanvasDocuments);
+  const baseMessages = extractedMessages.map((message) =>
+    canvasTargetMessage && message.id === canvasTargetMessage.id
+      ? appendCanvasDocumentsToMessage(message, pageCanvasDocuments)
+      : message
+  );
   const userMessages = baseMessages.filter((message) => message.role === "user");
   const uploadedFiles = userMessages.flatMap((message) => extractUploadedFilesFromText(message.text));
   const dedupedUploadedFiles = Array.from(
@@ -706,6 +999,10 @@ function extractChatGptConversationFromPage() {
   });
 
   const assistantMessages = messages.filter((message) => message.role === "assistant");
+  const totalCanvasCount = messages.reduce(
+    (count, message) => count + (message.canvasCount || 0),
+    0
+  );
   const totalSourceCount = assistantMessages.reduce(
     (count, message) => count + message.sourceCount,
     0
@@ -732,12 +1029,15 @@ function extractChatGptConversationFromPage() {
       messageCount: messages.length,
       userMessageCount: userMessages.length,
       assistantMessageCount: assistantMessages.length,
+      totalCanvasCount,
+      pageCanvasDocumentCount: pageCanvasDocuments.length,
       uploadCount: dedupedUploadedFiles.length,
       totalSourceCount,
       totalWebSourceCount,
       totalUploadReferenceCount
     },
     uploadedFiles: dedupedUploadedFiles,
+    pageCanvasDocuments,
     messages,
     extractionErrors
   };
