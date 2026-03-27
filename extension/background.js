@@ -7,20 +7,20 @@ const CHAT_SYNC_STORAGE_PREFIX = "chat_sync_state::";
 
 // ── Platform URL prefix → platform key mapping ────────────────────────────────
 const PLATFORM_URL_PREFIXES = {
-  chatgpt:  ["https://chatgpt.com/", "https://chat.openai.com/"],
-  gemini:   ["https://gemini.google.com/"],
-  claude:   ["https://claude.ai/"],
+  chatgpt: ["https://chatgpt.com/", "https://chat.openai.com/"],
+  gemini: ["https://gemini.google.com/"],
+  claude: ["https://claude.ai/"],
   deepseek: ["https://chat.deepseek.com/"],
-  copilot:  ["https://copilot.microsoft.com/", "https://www.bing.com/chat"]
+  copilot: ["https://copilot.microsoft.com/", "https://www.bing.com/chat"]
 };
 
 // ── Per-platform extractor file name + window function name ───────────────────
 const PLATFORM_EXTRACTORS = {
-  chatgpt:  { file: "chatgpt-extractor.js",  fn: "__hdExtractChatGptConversation"  },
-  gemini:   { file: "gemini-extractor.js",   fn: "__hdExtractGeminiConversation"   },
-  claude:   { file: "claude-extractor.js",   fn: "__hdExtractClaudeConversation"   },
+  chatgpt: { file: "chatgpt-extractor.js", fn: "__hdExtractChatGptConversation" },
+  gemini: { file: "gemini-extractor.js", fn: "__hdExtractGeminiConversation" },
+  claude: { file: "claude-extractor.js", fn: "__hdExtractClaudeConversation" },
   deepseek: { file: "deepseek-extractor.js", fn: "__hdExtractDeepSeekConversation" },
-  copilot:  { file: "copilot-extractor.js",  fn: "__hdExtractCopilotConversation"  }
+  copilot: { file: "copilot-extractor.js", fn: "__hdExtractCopilotConversation" }
 };
 
 console.log("[AI Chat Extractor] Background service worker booted:", {
@@ -88,10 +88,10 @@ function buildIncrementalChatPayload(payload, syncState, conversationKey) {
   const startIndex = matchedIndex >= 0 ? matchedIndex + 1 : 0;
   const newMessages = allMessages.slice(startIndex);
   const uploadedFiles = filterUploadedFilesByMessages(payload?.uploadedFiles, newMessages);
-  const userMessageCount       = newMessages.filter((m) => m.role === "user").length;
-  const assistantMessageCount  = newMessages.filter((m) => m.role === "assistant").length;
-  const totalSourceCount       = newMessages.reduce((n, m) => n + (m?.sourceCount || 0), 0);
-  const totalWebSourceCount    = newMessages.reduce((n, m) => n + (m?.sources || []).filter((s) => s.type === "web").length, 0);
+  const userMessageCount = newMessages.filter((m) => m.role === "user").length;
+  const assistantMessageCount = newMessages.filter((m) => m.role === "assistant").length;
+  const totalSourceCount = newMessages.reduce((n, m) => n + (m?.sourceCount || 0), 0);
+  const totalWebSourceCount = newMessages.reduce((n, m) => n + (m?.sources || []).filter((s) => s.type === "web").length, 0);
   const totalUploadReferenceCount = newMessages.reduce((n, m) => n + (m?.sources || []).filter((s) => s.type === "upload").length, 0);
   const lastMessage = allMessages[allMessages.length - 1] || null;
 
@@ -133,9 +133,9 @@ async function uploadAttachmentToBackend(uploadRequest) {
     return { attempted: false, reason: "BACKEND_ATTACHMENT_URL is not configured." };
   }
 
-  const metadata    = uploadRequest?.metadata || {};
+  const metadata = uploadRequest?.metadata || {};
   const conversation = metadata.conversation || {};
-  const fileData    = uploadRequest?.fileData || {};
+  const fileData = uploadRequest?.fileData || {};
 
   if (!fileData.base64) {
     return { attempted: true, ok: false, status: "missing_file_data", error: "No serialized file data was provided." };
@@ -143,15 +143,15 @@ async function uploadAttachmentToBackend(uploadRequest) {
 
   try {
     const fileBytes = base64ToUint8Array(fileData.base64);
-    const fileBlob  = new Blob([fileBytes], { type: fileData.type || "application/octet-stream" });
-    const formData  = new FormData();
+    const fileBlob = new Blob([fileBytes], { type: fileData.type || "application/octet-stream" });
+    const formData = new FormData();
 
     formData.append("file", fileBlob, fileData.name || "upload.bin");
-    formData.append("platform",        conversation.platform || "unknown");
-    formData.append("capture_source",  metadata.source || "unknown");
-    if (conversation.id)    formData.append("external_conversation_id", conversation.id);
-    if (conversation.url)   formData.append("conversation_url",         conversation.url);
-    if (conversation.title) formData.append("conversation_title",       conversation.title);
+    formData.append("platform", conversation.platform || "unknown");
+    formData.append("capture_source", metadata.source || "unknown");
+    if (conversation.id) formData.append("external_conversation_id", conversation.id);
+    if (conversation.url) formData.append("conversation_url", conversation.url);
+    if (conversation.title) formData.append("conversation_title", conversation.title);
 
     const response = await fetch(BACKEND_ATTACHMENT_URL, { method: "POST", body: formData });
     let responseBody = null;
@@ -178,8 +178,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "chatgpt_attachment_captured") {
     console.log("[AI Chat Extractor] Attachment captured:", {
-      tabId:   sender.tab?.id  || null,
-      url:     sender.tab?.url || null,
+      tabId: sender.tab?.id || null,
+      url: sender.tab?.url || null,
       payload: message.payload || null
     });
     sendResponse({ ok: true });
@@ -190,8 +190,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     void (async () => {
       const result = await uploadAttachmentToBackend(message.payload);
       console.log("[AI Chat Extractor] Upload result:", {
-        tabId:  sender.tab?.id  || null,
-        url:    sender.tab?.url || null,
+        tabId: sender.tab?.id || null,
+        url: sender.tab?.url || null,
         result
       });
       sendResponse(result);
@@ -236,10 +236,10 @@ async function extractConversationFromTab(tabId, platform) {
 // ── Backend forwarding (with incremental sync) ────────────────────────────────
 
 async function sendChatPayloadToBackend(payload, platform) {
-  const conversationKey  = getConversationSyncKey(payload);
-  const syncState        = await getConversationSyncState(conversationKey);
-  const preparedPayload  = buildIncrementalChatPayload(payload, syncState, conversationKey);
-  const label            = `[AI Chat Extractor][${platform}] Prepared chat payload to send:`;
+  const conversationKey = getConversationSyncKey(payload);
+  const syncState = await getConversationSyncState(conversationKey);
+  const preparedPayload = buildIncrementalChatPayload(payload, syncState, conversationKey);
+  const label = `[AI Chat Extractor][${platform}] Prepared chat payload to send:`;
 
   console.log(label, preparedPayload.payload);
 
@@ -256,6 +256,10 @@ async function sendChatPayloadToBackend(payload, platform) {
     await setConversationSyncState(conversationKey, preparedPayload.nextSyncState);
     return {
       attempted: false,
+      reason: "BACKEND_CHAT_URL is not configured.",
+      sync: preparedPayload.payload.incrementalSync,
+      preparedPayload: preparedPayload.payload,
+      advancedWithoutBackend: true
       reason: "BACKEND_CHAT_URL is not configured.",
       sync: preparedPayload.payload.incrementalSync,
       preparedPayload: preparedPayload.payload,
@@ -284,12 +288,18 @@ async function sendChatPayloadToBackend(payload, platform) {
       response: responseBody,
       sync: preparedPayload.payload.incrementalSync,
       preparedPayload: preparedPayload.payload
+      response: responseBody,
+      sync: preparedPayload.payload.incrementalSync,
+      preparedPayload: preparedPayload.payload
     };
   } catch (error) {
     return {
       attempted: true,
       ok: false,
       status: "network_error",
+      error: String(error),
+      sync: preparedPayload.payload.incrementalSync,
+      preparedPayload: preparedPayload.payload
       error: String(error),
       sync: preparedPayload.payload.incrementalSync,
       preparedPayload: preparedPayload.payload
@@ -343,7 +353,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 
   try {
     const extractedConversation = await extractConversationFromTab(tab.id, platform);
-    const backendResult         = await sendChatPayloadToBackend(extractedConversation, platform);
+    const backendResult = await sendChatPayloadToBackend(extractedConversation, platform);
 
     await logDebugPayloadInTab(
       tab.id,
@@ -351,13 +361,13 @@ chrome.action.onClicked.addListener(async (tab) => {
       backendResult?.preparedPayload || null
     );
 
-    const highlightPayload   = HighlightNormalizer.buildHighlightPayloadFromBackend(backendResult, extractedConversation);
+    const highlightPayload = HighlightNormalizer.buildHighlightPayloadFromBackend(backendResult, extractedConversation);
     const highlightingResult = await applyHighlightsInTab(tab.id, highlightPayload);
 
     const payload = {
       ...extractedConversation,
       highlightPayload,
-      highlighting:     highlightingResult,
+      highlighting: highlightingResult,
       backendForwarding: backendResult
     };
 

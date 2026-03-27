@@ -16,13 +16,26 @@ function sanitizeFileName(fileName) {
     .replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+function buildAvailableFileName(fileName) {
+  const safeName = sanitizeFileName(fileName);
+  const parsedPath = path.parse(safeName);
+  let candidateName = safeName;
+  let counter = 1;
+
+  while (fs.existsSync(path.join(UPLOAD_DIR, candidateName))) {
+    candidateName = `${parsedPath.name} (${counter})${parsedPath.ext}`;
+    counter += 1;
+  }
+
+  return candidateName;
+}
+
 const storage = multer.diskStorage({
   destination(_req, _file, cb) {
     cb(null, UPLOAD_DIR);
   },
   filename(_req, file, cb) {
-    const safeName = sanitizeFileName(file.originalname);
-    cb(null, `${Date.now()}-${safeName}`);
+    cb(null, buildAvailableFileName(file.originalname));
   }
 });
 

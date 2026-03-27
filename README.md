@@ -27,7 +27,6 @@ A production-grade system that intercepts AI-generated responses, extracts claim
 - [Technical Decisions & Rationale](#technical-decisions--rationale)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
-- [Implementation Phases](#implementation-phases)
 
 ---
 
@@ -47,10 +46,12 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 |---|---|
 | **Multi-source verification** | Checks against conversation history, user documents, AND web search simultaneously |
 | **Claim-level granularity** | Every individual claim is scored, not just the entire response |
+| **LLM-driven source selection** | The claim extractor intelligently suggests which sources to check per claim |
 | **Source attribution** | Every verification result links back to the actual source (URL, document chunk, conversation turn) |
-| **Model-agnostic** | Works with any LLM — compare hallucination rates across 5-7+ models side-by-side |
+| **Model-agnostic** | Works with any LLM — compare hallucination rates across 10+ free models side-by-side |
 | **Dual interface** | Use via browser extension on ChatGPT/Claude/Gemini OR our built-in multi-model chat |
-| **Real-time** | Parallel pipeline architecture for sub-second verification per claim |
+| **100% free LLM access** | All chat models use free-tier APIs (Groq, NVIDIA NIM, OpenRouter, Ollama) |
+| **GPU-accelerated** | NLI verification runs on local GPU (CUDA) for fast inference |
 
 ---
 
@@ -88,38 +89,40 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 │  │              STEP 1: PARALLEL EXTRACTION                    │        │
 │  │  ┌─────────────────────┐   ┌──────────────────────────────┐ │        │
 │  │  │  NER Extractor      │   │  Claim Extractor (LLM)       │ │        │
-│  │  │  (spaCy / sm LLM)   │   │  (Gemini 2.0 Flash)          │ │        │
-│  │  │  → entities/rels    │   │  → claims + source hints     │ │        │
+│  │  │  (spaCy en_core_    │   │  (Groq Llama 3.3 70B)        │ │        │
+│  │  │   web_sm)           │   │  → claims + suggested sources│ │        │
+│  │  │  → flat entities    │   │  + search queries + confidence│ │        │
+│  │  │  → PostgreSQL       │   │                              │ │        │
 │  │  └────────┬────────────┘   └────────────┬─────────────────┘ │        │
 │  └───────────┼─────────────────────────────┼───────────────────┘        │
 │              ▼                             ▼                            │
-│       ┌──────────┐              ┌─────────────────┐                     │
-│       │  Redis   │              │  Claims[] with  │                     │
-│       │  (Cache) │              │  source hints & │                     │
-│       └──────────┘              │  probabilities  │                     │
+│       ┌─────────────┐           ┌─────────────────┐                     │
+│       │ PostgreSQL  │           │  Claims[] with  │                     │
+│       │ (entities)  │           │  source hints & │                     │
+│       └─────────────┘           │  probabilities  │                     │
 │                                 └────────┬────────┘                     │
 │                                          ▼                              │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │              STEP 2: MULTI-SOURCE VERIFICATION (Parallel)   │        │
-│  │                     (per claim, all sources in parallel)    │        │
+│  │        STEP 2: MULTI-SOURCE VERIFICATION (Parallel)         │        │
+│  │               (per claim, all sources in parallel)          │        │
 │  │                                                             │        │
 │  │  ┌──────────────────┐ ┌────────────────┐ ┌───────────────┐  │        │
 │  │  │ Conversation     │ │ Vector DB      │ │ Web Search    │  │        │
 │  │  │ History          │ │ (User Docs)    │ │ (Tavily API)  │  │        │
 │  │  │                  │ │                │ │               │  │        │
-│  │  │ Query entity     │ │ Semantic       │ │ Search web,   │  │        │
-│  │  │ graph (AGE)      │ │ search on      │ │ return        │  │        │
-│  │  │ for relevant     │ │ pgvector for   │ │ snippets +    │  │        │
-│  │  │ entities/rels    │ │ relevant       │ │ SOURCE URLs   │  │        │
-│  │  │                  │ │ doc chunks     │ │               │  │        │
+│  │  │ Match NER        │ │ Semantic       │ │ Search web,   │  │        │
+│  │  │ entities from    │ │ search on      │ │ return        │  │        │
+│  │  │ PostgreSQL to    │ │ pgvector for   │ │ snippets +    │  │        │
+│  │  │ find relevant    │ │ relevant       │ │ SOURCE URLs   │  │        │
+│  │  │ prior messages   │ │ doc chunks     │ │               │  │        │
 │  │  └──────┬───────────┘ └──────┬─────────┘ └──────┬────────┘  │        │
 │  └─────────┼────────────────────┼──────────────────┼───────────┘        │
 │            └──────────┬─────────┘──────────────────┘                    │
 │                       ▼                                                 │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │        STEP 3: NLI VERIFICATION (DeBERTa-v3-base)           │        │
+│  │        STEP 3: NLI VERIFICATION (DeBERTa-v3-base on GPU)    │        │
 │  │        For each (claim, evidence) pair → ENTAIL/CONTRA/NEU  │        │
-│  │        Batched inference on GPU via run_in_executor         │        │
+│  │        Batched inference on CUDA via run_in_executor         │        │
 │  └────────────────────────┬────────────────────────────────────┘        │
 │                           ▼                                             │
 │  ┌─────────────────────────────────────────────────────────────┐        │
@@ -138,25 +141,16 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        STORAGE LAYER                                    │
 │                                                                         │
-│  ┌──────────────────────┐  ┌────────────────┐  ┌────────────────────┐   │
-│  │  PostgreSQL          │  │  pgvector      │  │  Apache AGE        │   │
-│  │  (Core relational)   │  │  (Embeddings)  │  │  (Entity Graph)    │   │
-│  │                      │  │                │  │                    │   │
-│  │  • users             │  │  • document    │  │  • NER entities    │   │
-│  │  • conversations     │  │    chunk       │  │  • relationships   │   │
-│  │  • messages          │  │    embeddings  │  │  • per-conversation│   │
-│  │  • documents         │  │  • HNSW index  │  │    graphs          │   │
-│  │  • analysis_results  │  │                │  │                    │   │
-│  │  • claim_results     │  │                │  │                    │   │
-│  └──────────────────────┘  └────────────────┘  └────────────────────┘   │
-│                                                                         │
-│  ┌─────────────────────────────────┐                                    │
-│  │  Redis                          │                                    │
-│  │  • NER cache (per conversation, │                                    │
-│  │     invalidate on new messages) │                                    │
-│  │  • Session state                │                                    │
-│  │  • Rate limiting                │                                    │
-│  └─────────────────────────────────┘                                    │
+│  ┌──────────────────────────────┐  ┌────────────────────────────────┐   │
+│  │  PostgreSQL                  │  │  pgvector (extension)          │   │
+│  │  (Core relational)          │  │  (Document embeddings)         │   │
+│  │                              │  │                                │   │
+│  │  • conversations             │  │  • document_chunks.embedding   │   │
+│  │  • messages                  │  │    (768d nomic-embed-text)     │   │
+│  │  • documents                 │  │  • L2 distance similarity     │   │
+│  │  • document_chunks           │  │    search                     │   │
+│  │  • extracted_entities (NER)  │  │                                │   │
+│  └──────────────────────────────┘  └────────────────────────────────┘   │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -166,24 +160,24 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 ## Features
 
 ### 🔍 Core Detection Engine
-- **LLM-powered claim extraction** — Uses Gemini 2.0 Flash to decompose AI responses into individual verifiable claims with type classification and source suggestions
+- **LLM-powered claim extraction** — Uses Groq Llama 3.3 70B to decompose AI responses into individual verifiable claims with type classification and per-claim source suggestions
+- **Smart source selection** — LLM dynamically recommends which sources (web, documents, conversation) to check per claim; config booleans act as opt-out overrides only
 - **Multi-source parallel verification** — Checks each claim against conversation history, user-uploaded documents, and live web search simultaneously
-- **NLI-based semantic verification** — DeBERTa-v3-base cross-encoder classifies each (claim, evidence) pair as entailment / contradiction / neutral
+- **NLI-based semantic verification** — DeBERTa-v3-base cross-encoder on GPU classifies each (claim, evidence) pair as entailment / contradiction / neutral
 - **Weighted risk score aggregation** — Combines multiple signals (source support, contradictions, coverage, importance, agreement) into a 0–100 score
 - **Source-attributed explanations** — Every flagged claim links back to the actual source URL, document chunk, or conversation turn
 
 ### 💬 Multi-Model Chat Interface
 - **Compare up to 3 LLMs side-by-side** — Send one message, get responses from multiple models simultaneously
+- **10+ free models** — Groq, NVIDIA NIM, OpenRouter, and local Ollama — no paid API keys required
 - **Dynamic layout** — Chat window automatically adjusts from 1 to 2 to 3 columns based on selected models
 - **Per-model analysis** — Each response independently analyzed for hallucinations in parallel
-- **Model switching** — Change any model mid-conversation via dropdown in each column header
-- **Unified input** — Type once, send to all; conversation history maintained per-model
+- **Streaming** — Real-time SSE streaming for all model responses
 - **Document upload** — Upload reference documents that become part of the verification knowledge base
 
 ### 🧩 Browser Extension
 - **Works on ChatGPT, Claude, Gemini** — Content script detects AI response bubbles on LLM chat websites
 - **Non-intrusive overlay** — Small risk badge on each response; click to expand full analysis panel
-- **Document capture** — If user uploads documents in the LLM chat, extension captures them for verification
 - **Same backend** — Extension calls the exact same `/detect` API endpoint as the chat frontend
 
 ### 📊 Analysis Display
@@ -199,19 +193,18 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 
 | Layer | Technology | Why |
 |---|---|---|
-| **Backend** | Python + FastAPI | Async-first, high performance, native Python ML ecosystem |
+| **Backend** | Python 3.13 + FastAPI | Async-first, high performance, native Python ML ecosystem |
 | **Frontend** | Next.js (React) + TypeScript | Component-based, SSR, great DX |
 | **Extension** | Chrome Manifest V3 | Modern extension standard, vanilla JS |
-| **Database** | PostgreSQL | Battle-tested, extensible with pgvector + AGE |
-| **Vector Store** | pgvector (PostgreSQL extension) | No separate infra, HNSW indexing, hybrid queries |
-| **Graph Store** | Apache AGE (PostgreSQL extension) | Entity-relationship graphs within PostgreSQL |
-| **Cache** | Redis | NER caching, session state, rate limiting |
-| **NLI Model** | DeBERTa-v3-base (cross-encoder) | 92.38% SNLI accuracy, ~0.032s/claim, fits in 6GB VRAM |
-| **Claim Extraction** | Gemini 2.0 Flash (via API) | Fast, smart structured output, cost-effective |
-| **NER** | spaCy (en_core_web_trf) | Fast, accurate entity extraction |
-| **Embeddings** | nomic-embed-text (via Ollama) | Local, free, outperforms OpenAI ada-002, 768d |
+| **Database** | PostgreSQL 16 | Battle-tested, extensible with pgvector |
+| **Vector Store** | pgvector (PostgreSQL extension) | No separate infra, L2 distance, hybrid queries |
+| **NLI Model** | DeBERTa-v3-base (cross-encoder) | 92.38% SNLI accuracy, GPU-accelerated (CUDA 12.4) |
+| **Claim Extraction** | Llama 3.3 70B (via Groq) | Ultra-fast inference, excellent JSON output, free tier |
+| **NER** | spaCy (en_core_web_sm) | Fast, accurate entity extraction |
+| **Embeddings** | nomic-embed-text (via Ollama) | Local, free, 768d vectors |
 | **Web Search** | Tavily API | AI-native, returns source URLs + clean text, RAG-optimized |
-| **Containerization** | Docker + Docker Compose | Reproducible local development |
+| **Chat LLMs** | Groq / NVIDIA NIM / OpenRouter / Ollama | All free-tier — no paid API keys needed |
+| **Containerization** | Docker + Docker Compose + NVIDIA Container Toolkit | GPU passthrough, reproducible deployment |
 
 ---
 
@@ -223,20 +216,21 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 Request arrives at POST /detect
 │
 ├── STEP 1 (PARALLEL):
-│   ├── NER Extraction → entities/relationships → cache in Redis
-│   └── Claim Extraction (Gemini 2.0 Flash) → claims[] + source suggestions
+│   ├── NER Extraction (spaCy) → flat entities → PostgreSQL (incremental)
+│   └── Claim Extraction (Groq Llama 3.3 70B) → claims[] + suggested_sources + search_queries
 │
 │   ⏳ Wait for both to complete
 │
-├── STEP 2 (PARALLEL, per claim, per source):
-│   ├── Query conversation history (entity graph via Apache AGE)
-│   ├── Query vector DB (user documents via pgvector) — only if document_ids present
-│   └── Query web search (Tavily API) — only if claim confidence > threshold
+├── STEP 2 (PARALLEL, per claim):
+│   ├── Conversation history — always checked if history exists (NER entity match)
+│   ├── Vector DB (pgvector) — always checked if document_ids provided
+│   └── Web search (Tavily) — checked if LLM suggests it for this claim
+│   (config booleans are opt-out overrides, NOT opt-in gates)
 │
 │   ⏳ Wait for all evidence to be retrieved
 │
-├── STEP 3: NLI Verification
-│   └── Batch all (claim, evidence) pairs → DeBERTa-v3-base → scores
+├── STEP 3: NLI Verification (GPU)
+│   └── Batch all (claim, evidence) pairs → DeBERTa-v3-base on CUDA → scores
 │
 ├── STEP 4: Risk Score Aggregation
 │   └── Per-claim scores → weighted overall score
@@ -249,15 +243,15 @@ Request arrives at POST /detect
 
 When a request arrives, two operations run **in parallel**:
 
-#### 1A. NER Extraction
-- Extract named entities and relationships from the full conversation (user messages + AI responses)
-- **Incremental processing**: If NER results already cached in Redis for this conversation, only process new messages
-- Store extracted entity graph in Apache AGE (PostgreSQL)
-- Cache latest NER state in Redis with conversation-scoped key
-- **Invalidation**: Cache is invalidated when new messages are added to the conversation
+#### 1A. NER Extraction (spaCy)
+- Extract named entities from conversation messages using `en_core_web_sm`
+- **Entity types**: PERSON, ORG, GPE, DATE, CARDINAL, EVENT, PRODUCT, etc.
+- **Incremental processing**: Tracks `last_processed_index` — only runs spaCy on new messages, not the full conversation history
+- **Storage**: Each entity stored as a flat row in PostgreSQL's `extracted_entities` table, linked to its source `conversation_id`
+- **Duplicates**: If "Einstein" appears in messages #1, #3, and #5 → 3 separate rows, each linked to its source message. The verifier finds all matches and NLI picks the best evidence.
 
 #### 1B. Claim Extraction (LLM-Powered)
-Send the AI response + conversation context to **Gemini 2.0 Flash** with a structured prompt:
+Send the AI response + conversation context to **Groq Llama 3.3 70B** with a structured prompt:
 
 ```json
 {
@@ -265,29 +259,32 @@ Send the AI response + conversation context to **Gemini 2.0 Flash** with a struc
     {
       "id": "c1",
       "text": "The Eiffel Tower was built in 1889",
-      "type": "factual",           // factual | statistical | temporal | causal | definition
-      "importance": 0.8,           // 0-1, how critical this claim is to the response
+      "type": "factual",
+      "importance": 0.8,
       "suggested_sources": ["web_search", "conversation_history"],
       "search_queries": ["Eiffel Tower construction year"],
-      "confidence_needs_checking": 0.7   // 0-1, likelihood this needs verification
+      "confidence_needs_checking": 0.7,
+      "key_entities": ["Eiffel Tower", "1889"]
     }
   ]
 }
 ```
 
+The LLM intelligently decides which sources to check per claim — factual claims get `web_search`, contextual claims get `conversation_history`, document-referenced claims get `vector_db`.
+
 Claims with `confidence_needs_checking` below a configurable threshold (default: 0.3) are skipped to reduce latency.
 
-**Why Gemini 2.0 Flash?** It's the best balance of intelligence + speed + structured output for claim extraction. Smart enough to properly decompose complex responses into atomic claims, fast enough for real-time use (~200-500ms), and supports native JSON output.
+**Why Groq Llama 3.3 70B?** Ultra-fast LPU inference (~200-500ms), excellent JSON instruction-following, free tier (30 RPM, 14400 RPD). Smart enough to properly decompose complex responses into atomic claims.
 
 ### Step 2: Multi-Source Verification
 
-Each claim is verified against applicable sources **in parallel**. All sources return evidence snippets **with attribution**:
+Each claim is verified against applicable sources **in parallel**. Source selection is **LLM-driven** — the claim extractor's `suggested_sources` field decides which sources to check. Config booleans (`check_web`, `check_documents`, `check_conversation`) only serve as **opt-out overrides**.
 
-| Source | When Used | What It Returns |
+| Source | When Checked | What It Returns |
 |---|---|---|
-| **Conversation History** | Always | Relevant entity/relationship from the graph + the original message turn reference |
-| **Vector DB (User Docs)** | If `document_ids` provided in request | Matching document chunks + document name + chunk location |
-| **Web Search (Tavily)** | If claim extractor suggests it + confidence > threshold | Search snippets + **source URLs** + page titles |
+| **Conversation History** | Always (if history + NER entities exist, unless user disables) | Matching messages containing the same NER entities as the claim |
+| **Vector DB (User Docs)** | Always (if `document_ids` provided, unless user disables) | Semantically similar document chunks via pgvector L2 distance |
+| **Web Search (Tavily)** | When LLM's `suggested_sources` includes `web_search` AND Tavily key available | Search snippets + **source URLs** + page titles |
 
 #### Source Attribution Rules
 Every piece of evidence includes a traceable source reference:
@@ -297,7 +294,7 @@ Every piece of evidence includes a traceable source reference:
 
 ### Step 3: NLI-Based Claim Verification
 
-For each `(claim, evidence)` pair retrieved from the sources, run through the **NLI cross-encoder model**:
+For each `(claim, evidence)` pair retrieved from the sources, run through the **NLI cross-encoder model** on GPU:
 
 | NLI Output | Meaning | Impact |
 |---|---|---|
@@ -312,30 +309,15 @@ For each `(claim, evidence)` pair retrieved from the sources, run through the **
 | Architecture | DeBERTa-v3-base (86M params) |
 | SNLI Accuracy | 92.38% |
 | MNLI Accuracy | 90.04% |
-| Inference Speed | ~0.032s per (claim, evidence) pair |
-| VRAM Usage | ~1.5–2 GB |
-| Fact-checking | MiniCheck-DeBERTa outperforms all same-sized fact-checkers |
-
-**Why DeBERTa-v3 over RoBERTa?**
-
-| Metric | DeBERTa-v3-base | RoBERTa-large |
-|---|---|---|
-| SNLI Accuracy | **92.38%** | 92.0% |
-| MNLI Accuracy | **90.04%** | 89.4% |
-| Fact-checking (MiniCheck) | **Best in class** at this scale | Lower performance |
-| Architecture | Disentangled attention + enhanced mask decoder | Optimized BERT |
-| Parameters (base) | 86M | 125M (base), 355M (large) |
-| Speed | Faster (fewer params at base size) | Comparable |
-
-DeBERTa-v3 wins on accuracy, fact-checking performance, AND efficiency at the base size.
+| Device | CUDA (RTX 4050, 6GB VRAM) |
+| PyTorch | 2.6.0+cu124 |
+| VRAM Usage | ~400 MB |
 
 **Non-Blocking GPU Inference in FastAPI:**
 
-The NLI model runs on GPU (RTX 4050, 6GB VRAM). To prevent blocking other FastAPI requests:
-- Model inference runs via `asyncio.run_in_executor()` which offloads to a thread pool
-- Alternatively, define inference routes as sync `def` (not `async def`) — FastAPI auto-runs these in a thread pool
-- The GPU operation releases the Python GIL during CUDA compute, allowing other threads to proceed
-- For maximum throughput: batch all (claim, evidence) pairs per request into a single forward pass
+- Model inference runs via `asyncio.run_in_executor()` → offloads to thread pool → event loop stays free
+- GPU operations release the Python GIL during CUDA compute, allowing other async tasks to proceed
+- All (claim, evidence) pairs per request batched into a single forward pass for efficiency
 
 ### Step 4: Risk Score Aggregation
 
@@ -351,14 +333,6 @@ claim_risk = (
     w6 * (1 - evidence_count_norm)            # Amount of evidence     (weight: 0.05)
 ) * 100
 ```
-
-Where:
-- `max_entailment_score`: Highest entailment score across all evidence for this claim
-- `max_contradiction_score`: Highest contradiction score across all evidence
-- `source_coverage_ratio`: Fraction of queried sources that returned any evidence
-- `claim_importance`: From the claim extractor (how critical this claim is)
-- `source_agreement_variance`: How much sources disagree with each other
-- `evidence_count_norm`: Normalized count of evidence pieces found
 
 #### Overall Response Risk Score (0–100)
 
@@ -381,12 +355,12 @@ if unverifiable_ratio > 0.5:
 
 #### Risk Levels
 
-| Score | Level | Color | Icon | Default Warning Message |
-|---|---|---|---|---|
-| 0–25 | LOW | 🟢 Green | ✓ | "Response appears well-grounded" |
-| 26–50 | MODERATE | 🟡 Amber | ⚠ | "Some claims could not be fully verified" |
-| 51–75 | HIGH | 🟠 Orange | ⚠ | "Multiple unverified or questionable claims detected" |
-| 76–100 | CRITICAL | 🔴 Red | ✕ | "Response contains likely hallucinated content" |
+| Score | Level | Color | Default Warning Message |
+|---|---|---|---|
+| 0–25 | LOW | 🟢 Green | "Response appears well-grounded" |
+| 26–50 | MODERATE | 🟡 Amber | "Some claims could not be fully verified" |
+| 51–75 | HIGH | 🟠 Orange | "Multiple unverified or questionable claims detected" |
+| 76–100 | CRITICAL | 🔴 Red | "Response contains likely hallucinated content" |
 
 ### Step 5: Output Generation
 
@@ -401,7 +375,6 @@ Generated contextually based on specific claim verification results:
 | Contradicts conversation history | "Contradicts earlier conversation context (message #{n})" |
 | Statistical claim unverified | "Statistical claim could not be verified: `{claim_text}`" |
 | Sources disagree | "Sources disagree on: `{claim_text}` — check linked sources" |
-| Temporal claim outdated | "This information may be outdated — latest source is from `{date}`" |
 
 #### Full Response Schema
 
@@ -432,6 +405,7 @@ Generated contextually based on specific claim verification results:
       "type": "factual",
       "risk_score": 8,
       "status": "VERIFIED",
+      "suggested_sources": ["web_search", "conversation_history"],
       "verification_details": {
         "entailment_score": 0.96,
         "contradiction_score": 0.01,
@@ -443,22 +417,9 @@ Generated contextually based on specific claim verification results:
             "source_title": "Eiffel Tower - Wikipedia",
             "snippet": "Construction began on 28 January 1887 and was finished on 15 March 1889.",
             "nli_label": "ENTAILMENT",
-            "nli_score": 0.96
+            "nli_scores": { "entailment": 0.96, "contradiction": 0.01, "neutral": 0.03 }
           }
         ]
-      }
-    },
-    {
-      "id": "c3",
-      "text": "The mortality rate decreased by 47% after the intervention",
-      "type": "statistical",
-      "risk_score": 85,
-      "status": "UNVERIFIED",
-      "verification_details": {
-        "entailment_score": 0.0,
-        "contradiction_score": 0.0,
-        "sources_checked": ["web_search", "vector_db"],
-        "evidence": []
       }
     }
   ],
@@ -476,13 +437,15 @@ Generated contextually based on specific claim verification results:
 
 | Method | Endpoint | Description |
 |---|---|---|
+| `GET` | `/health` | Health check |
+| `GET` | `/api/v1/models` | List all available LLM models |
 | `POST` | `/api/v1/detect` | Main hallucination detection — accepts AI response + context, returns full analysis |
-| `POST` | `/api/v1/chat` | Proxy to LLM APIs — forwards user message to selected model, returns streamed response |
-| `POST` | `/api/v1/documents/upload` | Upload document → chunk → embed → store in pgvector. Returns `document_id` |
-| `GET` | `/api/v1/documents/{id}` | Get document metadata and chunk count |
+| `POST` | `/api/v1/chat` | Proxy to LLM APIs — forwards user message to selected model, supports SSE streaming |
+| `POST` | `/api/v1/documents/upload` | Upload document → chunk → embed (nomic-embed-text via Ollama) → store in pgvector |
+| `GET` | `/api/v1/documents/{id}` | Get document metadata |
 | `DELETE` | `/api/v1/documents/{id}` | Delete document and its embeddings |
 | `POST` | `/api/v1/conversations` | Create a new conversation context |
-| `GET` | `/api/v1/conversations/{id}` | Get conversation history and NER state |
+| `GET` | `/api/v1/conversations/{id}` | Get conversation with messages |
 | `POST` | `/api/v1/conversations/{id}/messages` | Add messages to a conversation |
 
 #### `POST /api/v1/detect` — Request
@@ -490,13 +453,13 @@ Generated contextually based on specific claim verification results:
 ```json
 {
   "conversation_id": "uuid",
-  "model_id": "gpt-4o",
+  "model_id": "llama-3.3-70b-versatile",
   "model_response": "The Eiffel Tower was built in 1889 by Gustave Eiffel...",
   "conversation_history": [
     { "role": "user", "content": "Tell me about the Eiffel Tower" },
     { "role": "assistant", "content": "The Eiffel Tower was built in 1889..." }
   ],
-  "document_ids": ["doc-uuid-1", "doc-uuid-2"],
+  "document_ids": ["doc-uuid-1"],
   "config": {
     "check_web": true,
     "check_documents": true,
@@ -506,12 +469,14 @@ Generated contextually based on specific claim verification results:
 }
 ```
 
+> **Note:** Config booleans are **opt-out overrides**. Set to `false` to force-disable a source. When `true` (default), the LLM's per-claim `suggested_sources` drives which sources are actually queried.
+
 #### `POST /api/v1/chat` — Request
 
 ```json
 {
   "conversation_id": "uuid",
-  "model_id": "gpt-4o",
+  "model_id": "llama-3.3-70b-versatile",
   "message": "Tell me about the Eiffel Tower",
   "conversation_history": [],
   "stream": true
@@ -530,7 +495,8 @@ The chat frontend is built with **Next.js (React + TypeScript)**, featuring a dy
 ┌─────────────────────────────────────────────────────────┐
 │  🛡️ AI Hallucination Detector         [Upload Doc] [⚙] │
 ├───────────────────┬───────────────────┬─────────────────┤
-│ ▼ GPT-4o          │ ▼ Claude 3.5 Son. │ ▼ Gemini 2.0    │
+│ ▼ Llama 3.3 70B   │ ▼ Mistral 7B      │ ▼ Gemma 2 9B    │
+│   (Groq)          │   (NVIDIA)        │   (Groq)        │
 │                   │                   │                 │
 │ User: Tell me...  │ User: Tell me...  │ User: Tell me...│
 │                   │                   │                 │
@@ -552,27 +518,11 @@ The chat frontend is built with **Next.js (React + TypeScript)**, featuring a dy
 | Feature | Implementation |
 |---|---|
 | **Dynamic columns** | 1 model = full width, 2 models = 50/50, 3 models = 33/33/33. CSS Grid with smooth transitions |
-| **Model selector** | Dropdown in each column header. Can be changed at any point mid-conversation |
-| **Unified input** | Single message input at the bottom. Message + conversation history sent to all selected models in parallel |
-| **Parallel detection** | After each model responds, frontend calls `POST /detect` for each response independently and in parallel |
+| **Model selector** | Dropdown in each column header with all 10+ free models |
+| **Parallel detection** | After each model responds, frontend calls `POST /detect` for each response independently |
 | **Hallucination overlay** | Expandable panel below each AI response showing: risk gauge, claim cards, source links, warnings |
-| **Inline highlighting** | Risky claims highlighted directly in the response text (red/amber/green underlines) |
-| **Document upload** | Upload PDFs/docs via header button → backend chunks + embeds → `document_ids` included in all future `/detect` calls |
-| **Streaming** | Model responses stream in real-time; detection runs after stream completes |
-| **Add/remove models** | "+ Add Model" button (max 3). Each column has an "×" to remove. Minimum 1 model required |
-
-### Key Components
-
-| Component | Purpose |
-|---|---|
-| `ChatWindow` | Individual model conversation column with messages + analysis overlay |
-| `ModelSelector` | Dropdown with all supported models + model metadata (provider icon, name) |
-| `MessageInput` | Unified input bar with file upload, send button |
-| `RiskGauge` | Animated circular gauge (0–100) with color transitions |
-| `ClaimBreakdown` | Expandable claim cards with status icons, evidence, source links |
-| `WarningBanner` | Contextual alert bar with severity icon and message |
-| `SourcePanel` | Clickable source references (URLs, document chunks, conversation turns) |
-| `ComparisonView` | Grid layout manager that adjusts columns dynamically |
+| **Document upload** | Upload PDFs/docs → backend chunks + embeds → `document_ids` included in all future `/detect` calls |
+| **Streaming** | Model responses stream in real-time via SSE; detection runs after stream completes |
 
 ---
 
@@ -593,227 +543,107 @@ extension/
 
 ### How It Works
 
-1. **Content script** detects AI response elements on supported LLM websites (ChatGPT, Claude, Gemini) using DOM observers
+1. **Content script** detects AI response elements on supported LLM websites using DOM observers
 2. When a new AI response appears, content script extracts the response text + conversation history
-3. If user has uploaded documents in the chat → extension captures them → sends to backend `/documents/upload` → receives `document_ids`
-4. Content script sends detection request to **background service worker** (to avoid CORS)
-5. Background worker calls `POST /api/v1/detect` with the response, conversation history, and document IDs
-6. On response, content script renders:
-   - **Risk badge**: Small colored circle (🟢🟡🟠🔴) with score number overlaid on the AI response
-   - **Click to expand**: Floating panel with full claim breakdown, warnings, source links
-7. Extension popup allows configuring: backend URL, toggle auto-detection, view detection history
-
-### Supported Sites (Initial)
-
-| Site | Detection Method |
-|---|---|
-| ChatGPT (chat.openai.com) | Monitor `div[data-message-author-role="assistant"]` elements |
-| Claude (claude.ai) | Monitor assistant message containers |
-| Gemini (gemini.google.com) | Monitor model response containers |
+3. Background worker calls `POST /api/v1/detect` with the response and context
+4. Content script renders a **risk badge** (🟢🟡🟠🔴) overlaid on the AI response
+5. Click to expand full analysis panel with claim breakdown, warnings, and source links
 
 ---
 
 ## Storage Architecture
 
-### Single PostgreSQL Instance with Extensions
+### Single PostgreSQL Instance with pgvector
 
-We use **one PostgreSQL database** with two extensions, avoiding the complexity of managing separate database systems:
+We use **one PostgreSQL 16 database** with the `pgvector` extension, avoiding the complexity of separate database systems:
 
 #### Core Tables (PostgreSQL)
 
 ```sql
 -- Conversations & Messages
 CREATE TABLE conversations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
+    title VARCHAR(500),
     created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW(),
-    metadata JSONB
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE messages (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     conversation_id UUID REFERENCES conversations(id),
     role VARCHAR(20) NOT NULL,  -- 'user' or 'assistant'
     content TEXT NOT NULL,
-    model_id VARCHAR(50),       -- which LLM generated this (null for user)
+    model_id VARCHAR(100),
     created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Documents (user uploads)
 CREATE TABLE documents (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id UUID REFERENCES conversations(id),
-    filename VARCHAR(255),
-    file_type VARCHAR(50),
-    file_size_bytes INTEGER,
-    chunk_count INTEGER,
-    created_at TIMESTAMP DEFAULT NOW()
+    id UUID PRIMARY KEY,
+    filename VARCHAR(500),
+    content_type VARCHAR(100),
+    uploaded_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE document_chunks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     document_id UUID REFERENCES documents(id),
     chunk_index INTEGER,
-    content TEXT NOT NULL,
+    text_content TEXT NOT NULL,
     embedding vector(768),      -- pgvector: nomic-embed-text produces 768d
     created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Analysis Results
-CREATE TABLE analysis_results (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+-- NER Entities (flat, per-conversation)
+CREATE TABLE extracted_entities (
+    id UUID PRIMARY KEY,
     conversation_id UUID REFERENCES conversations(id),
-    message_id UUID REFERENCES messages(id),
-    model_id VARCHAR(50),
-    overall_risk_score FLOAT,
-    risk_level VARCHAR(20),
-    warnings JSONB,
-    processing_time_ms INTEGER,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE claim_results (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    analysis_id UUID REFERENCES analysis_results(id),
-    claim_text TEXT,
-    claim_type VARCHAR(30),
-    risk_score FLOAT,
-    status VARCHAR(20),         -- VERIFIED | UNVERIFIED | CONTRADICTED | SKIPPED
-    entailment_score FLOAT,
-    contradiction_score FLOAT,
-    evidence JSONB,             -- Array of evidence objects with source attribution
+    name VARCHAR(255) NOT NULL,
+    label VARCHAR(100) NOT NULL,  -- PERSON, ORG, GPE, DATE, etc.
+    source_message_id UUID REFERENCES messages(id),
     created_at TIMESTAMP DEFAULT NOW()
 );
 ```
 
-#### Vector Storage (pgvector)
+#### Vector Search (pgvector)
 
 ```sql
 -- Enable extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- HNSW index for fast similarity search
-CREATE INDEX ON document_chunks
-    USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-
--- Hybrid query example: vector search filtered by conversation
-SELECT id, content, 1 - (embedding <=> $1) AS similarity
+-- Semantic search: find document chunks similar to a claim
+SELECT id, text_content, document_id
 FROM document_chunks
-WHERE document_id IN (
-    SELECT id FROM documents WHERE conversation_id = $2
-)
-ORDER BY embedding <=> $1
-LIMIT 5;
+WHERE document_id IN ($document_ids)
+ORDER BY embedding <-> $query_embedding  -- L2 distance
+LIMIT 3;
 ```
 
 **Why pgvector over FAISS/ChromaDB?**
 - **Same database** — no additional infrastructure to deploy/manage
-- **Hybrid queries** — combine vector similarity with relational filters (filter by user, conversation, document) in a single SQL query
-- **Concurrent performance** — outperforms ChromaDB under concurrent load (9s vs 23s avg in benchmarks)
-- **HNSW indexing** — millisecond-level approximate nearest neighbor search
+- **Hybrid queries** — combine vector similarity with relational filters in a single SQL query
+- **Concurrent performance** — outperforms ChromaDB under concurrent load
 - **Scales** — handles 10–100M vectors before needing specialized solutions
-- **FAISS drawback** — Raw speed king, but it's a library, not a database. Requires significant engineering for metadata filtering, persistence, and serving
-- **ChromaDB drawback** — Great for prototyping, degrades under concurrency, limited to ~500K vectors practically
-
-#### Graph Storage (Apache AGE)
-
-```sql
--- Enable extension
-CREATE EXTENSION IF NOT EXISTS age;
-
--- Load graph module
-LOAD 'age';
-SET search_path = ag_catalog, "$user", public;
-
--- Create per-conversation graph
-SELECT create_graph('conversation_{uuid}');
-
--- Store entities and relationships
-SELECT * FROM cypher('conversation_{uuid}', $$
-    CREATE (e:Entity {name: 'Eiffel Tower', type: 'STRUCTURE', message_idx: 0})
-    RETURN e
-$$) AS (e agtype);
-
-SELECT * FROM cypher('conversation_{uuid}', $$
-    MATCH (a:Entity {name: 'Eiffel Tower'})
-    CREATE (a)-[:BUILT_BY {message_idx: 0}]->(b:Entity {name: 'Gustave Eiffel', type: 'PERSON'})
-    RETURN a, b
-$$) AS (a agtype, b agtype);
-
--- Query for contradiction checking
-SELECT * FROM cypher('conversation_{uuid}', $$
-    MATCH (e:Entity)-[r]->(related)
-    WHERE e.name = 'Eiffel Tower'
-    RETURN e.name, type(r), related.name, r.message_idx
-$$) AS (entity agtype, rel_type agtype, related agtype, msg_idx agtype);
-```
-
-#### Redis Cache Strategy
-
-| Key Pattern | Value | TTL | Invalidation |
-|---|---|---|---|
-| `ner:{conversation_id}` | Serialized NER results (entities + relationships) | 1 hour | On new message added to conversation |
-| `ner:{conversation_id}:last_msg_idx` | Index of last processed message | 1 hour | On new message |
-| `session:{session_id}` | Session state | 24 hours | On session end |
-| `ratelimit:{ip}:{endpoint}` | Request count | 1 minute | Auto-expire |
 
 ---
 
 ## Supported LLM Models
 
-The system supports **5-7+ models** ranging from state-of-the-art to budget options, enabling meaningful hallucination comparison:
+All models use **free-tier APIs** — no paid keys required:
 
-| Tier | Model | Provider | Strengths |
+| Tier | Model | Provider | Free Limits |
 |---|---|---|---|
-| 🥇 **Tier 1** | GPT-4o | OpenAI | Best overall reasoning and accuracy |
-| 🥇 **Tier 1** | Claude 3.5 Sonnet | Anthropic | Excellent at nuanced, factual responses |
-| 🥇 **Tier 1** | Gemini 2.0 Pro | Google | Strong factual grounding, multimodal |
-| 🥈 **Tier 2** | GPT-4o-mini | OpenAI | Good accuracy, faster and cheaper |
-| 🥈 **Tier 2** | Claude 3.5 Haiku | Anthropic | Fast, decent accuracy |
-| 🥈 **Tier 2** | Gemini 2.0 Flash | Google | Very fast, good for straightforward queries |
-| 🥉 **Tier 3** | Llama 3.1 70B (via Ollama) | Meta | Open-source, local option |
+| 🥇 **Tier 1** | Llama 3.3 70B | Groq | 30 RPM, 14400 RPD |
+| 🥇 **Tier 1** | Llama 3.1 70B | NVIDIA NIM | 1000 free credits |
+| 🥇 **Tier 1** | Llama 3.3 70B | OpenRouter | 20 RPM, 50 daily |
+| 🥇 **Tier 1** | Nemotron 70B | OpenRouter | 20 RPM, 50 daily |
+| 🥈 **Tier 2** | Llama 3.1 8B | Groq | 30 RPM, ultra-fast |
+| 🥈 **Tier 2** | Gemma 2 9B | Groq | 30 RPM |
+| 🥈 **Tier 2** | Mistral 7B | NVIDIA NIM | 1000 free credits |
+| 🥈 **Tier 2** | Gemini 2.5 Flash | OpenRouter | 20 RPM |
+| 🥉 **Tier 3** | Llama 3.1 8B | Ollama (local) | Unlimited, no internet |
 
 Users can select up to 3 models in the comparison view. The system sends the same message to all selected models, gets their responses, and runs independent hallucination detection on each — revealing which models hallucinate more on the same query.
-
----
-
-## Technical Decisions & Rationale
-
-### Why DeBERTa-v3-base for NLI (Not RoBERTa)?
-- **Higher accuracy**: 92.38% SNLI vs RoBERTa's 92.0% (at base size, DeBERTa-v3 uses fewer params)
-- **Better fact-checking**: MiniCheck-DeBERTa outperforms all same-scale fact-checkers on LLM-AggreFact benchmark
-- **Efficient architecture**: Disentangled attention + enhanced mask decoder = better results with fewer parameters
-- **VRAM friendly**: Base model fits comfortably in ~1.5–2 GB, leaving room for batching on 6GB RTX 4050
-
-### Why Gemini 2.0 Flash for Claim Extraction?
-- **Smart enough**: Properly decomposes complex responses into atomic verifiable claims
-- **Structured output**: Native JSON mode ensures reliable parsing
-- **Fast**: ~200–500ms per extraction call
-- **Cost-effective**: Significantly cheaper than GPT-4o or Claude for this high-frequency operation
-
-### Why Tavily for Web Search (Not Serper)?
-- **AI-native**: Built specifically for LLM/RAG workflows, returns structured content optimized for AI consumption
-- **Source URLs included**: Every result includes the source URL, page title, and relevant snippet — critical for our source attribution requirement
-- **Content extraction**: Can return full page content, not just SERP snippets
-- **Hallucination reduction**: Built-in content validation and source quality filtering
-- **Serper alternative**: Cheaper ($0.001/query) but returns raw SERP data — we'd need to build our own content extraction and quality filtering on top
-
-### Why nomic-embed-text for Embeddings (via Ollama)?
-- **Fully local**: Runs via Ollama, no API costs, no data leaving the machine
-- **Accurate**: Outperforms OpenAI text-embedding-ada-002 and text-embedding-3-small on both short and long-context tasks
-- **Fast**: ~257ms per document on CPU, faster on GPU
-- **768 dimensions**: Good balance of quality and storage efficiency for pgvector
-- **Large context window**: Handles long document chunks without truncation issues
-
-### Why pgvector over FAISS/ChromaDB?
-See [Storage Architecture](#storage-architecture) section for detailed comparison.
-
-### Non-Blocking NLI Inference in FastAPI
-The DeBERTa model runs on GPU. Since GPU operations release the Python GIL during CUDA compute:
-- Wrap inference in `asyncio.run_in_executor()` → offloads to thread pool → event loop stays free
-- Batch all (claim, evidence) pairs per request into a single forward pass for efficiency
-- Other FastAPI requests are NOT blocked while inference runs
 
 ---
 
@@ -822,114 +652,61 @@ The DeBERTa model runs on GPU. Since GPU operations release the Python GIL durin
 ```
 AI_HallicunationDetectionSystem/
 │
-├── README.md                        # This file
+├── README.md
+├── docker-compose.yml               # PostgreSQL + Backend
 │
 ├── backend/                         # FastAPI backend
 │   ├── app/
 │   │   ├── __init__.py
 │   │   ├── main.py                  # FastAPI app, startup events, middleware
-│   │   ├── config.py                # Environment config, API keys, model paths
+│   │   ├── config.py                # Environment config, API keys, model registry
 │   │   │
 │   │   ├── api/                     # Route handlers
 │   │   │   ├── __init__.py
 │   │   │   ├── detect.py            # POST /detect — main hallucination detection
-│   │   │   ├── chat.py              # POST /chat — LLM proxy with streaming
+│   │   │   ├── chat.py              # POST /chat — LLM proxy with SSE streaming
 │   │   │   ├── documents.py         # Document upload, retrieval, deletion
-│   │   │   └── conversations.py     # Conversation CRUD
+│   │   │   └── conversations.py     # Conversation CRUD + message management
 │   │   │
 │   │   ├── core/                    # Core detection pipeline
 │   │   │   ├── __init__.py
-│   │   │   ├── claim_extractor.py   # LLM-powered claim extraction (Gemini 2.0 Flash)
-│   │   │   ├── ner_extractor.py     # Named entity recognition (spaCy)
+│   │   │   ├── claim_extractor.py   # LLM-powered claim extraction (Groq Llama 3.3 70B)
+│   │   │   ├── ner_extractor.py     # Named entity recognition (spaCy en_core_web_sm)
 │   │   │   ├── verifier.py          # Multi-source verification orchestrator
-│   │   │   ├── nli_model.py         # DeBERTa NLI model wrapper + GPU inference
-│   │   │   ├── risk_scorer.py       # Per-claim + overall risk score calculation
+│   │   │   ├── nli_model.py         # DeBERTa NLI model wrapper + CUDA inference
+│   │   │   ├── risk_scorer.py       # Per-claim + overall risk score + warnings
 │   │   │   ├── web_search.py        # Tavily API integration
-│   │   │   └── document_processor.py # Document chunking + embedding pipeline
+│   │   │   ├── vector_db.py         # pgvector semantic search
+│   │   │   ├── embeddings.py        # Ollama nomic-embed-text client
+│   │   │   └── document_processor.py # Document chunking pipeline
 │   │   │
 │   │   ├── models/                  # Pydantic schemas
 │   │   │   ├── __init__.py
-│   │   │   ├── detect.py            # DetectionRequest, DetectionResponse, ClaimResult
+│   │   │   ├── detect.py            # DetectionRequest/Response, ClaimResult, EvidencePiece
 │   │   │   ├── chat.py              # ChatRequest, ChatResponse
-│   │   │   ├── documents.py         # DocumentUpload, DocumentResponse
+│   │   │   ├── documents.py         # DocumentResponse
 │   │   │   └── conversations.py     # ConversationCreate, MessageAdd
 │   │   │
 │   │   ├── db/                      # Database layer
 │   │   │   ├── __init__.py
-│   │   │   ├── postgres.py          # SQLAlchemy + asyncpg connection
-│   │   │   ├── vector.py            # pgvector operations (embed, search)
-│   │   │   ├── graph.py             # Apache AGE operations (entity CRUD, query)
-│   │   │   ├── redis.py             # Redis cache operations
-│   │   │   └── models.py            # SQLAlchemy ORM models
+│   │   │   ├── engine.py            # SQLAlchemy async engine + session factory
+│   │   │   └── models.py            # SQLAlchemy ORM models (all tables)
 │   │   │
 │   │   └── utils/                   # Helpers
-│   │       ├── __init__.py
-│   │       ├── llm_clients.py       # OpenAI, Anthropic, Google API clients
-│   │       └── text_processing.py   # Chunking, tokenization helpers
+│   │       └── __init__.py
+│   │
+│   ├── tests/                       # Test suite
+│   │   └── run_tests.ps1            # PowerShell API test suite (31 tests)
 │   │
 │   ├── alembic/                     # Database migrations
-│   │   ├── alembic.ini
-│   │   └── versions/
-│   │
 │   ├── requirements.txt
-│   ├── Dockerfile
+│   ├── Dockerfile                   # NVIDIA CUDA 12.4 + Python 3.13
+│   ├── .dockerignore
 │   └── .env.example
 │
 ├── frontend/                        # Next.js chat frontend
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── layout.tsx
-│   │   │   ├── page.tsx             # Main chat page
-│   │   │   └── globals.css
-│   │   │
-│   │   ├── components/
-│   │   │   ├── chat/
-│   │   │   │   ├── ChatWindow.tsx       # Individual model conversation column
-│   │   │   │   ├── MessageBubble.tsx    # Single message with inline highlights
-│   │   │   │   ├── MessageInput.tsx     # Unified input bar
-│   │   │   │   └── ComparisonView.tsx   # Dynamic grid layout manager
-│   │   │   │
-│   │   │   ├── analysis/
-│   │   │   │   ├── RiskGauge.tsx        # Animated circular gauge (0-100)
-│   │   │   │   ├── ClaimBreakdown.tsx   # Expandable claim cards
-│   │   │   │   ├── WarningBanner.tsx    # Contextual alert bar
-│   │   │   │   ├── SourcePanel.tsx      # Source references with links
-│   │   │   │   └── AnalysisOverlay.tsx  # Container for all analysis components
-│   │   │   │
-│   │   │   └── common/
-│   │   │       ├── ModelSelector.tsx     # Model dropdown
-│   │   │       ├── DocumentUpload.tsx    # File upload component
-│   │   │       └── Header.tsx           # App header
-│   │   │
-│   │   ├── lib/
-│   │   │   ├── api.ts               # Backend API client
-│   │   │   ├── types.ts             # TypeScript interfaces
-│   │   │   └── constants.ts         # Model list, colors, thresholds
-│   │   │
-│   │   └── hooks/
-│   │       ├── useChat.ts           # Chat state management
-│   │       ├── useDetection.ts      # Hallucination detection hook
-│   │       └── useDocuments.ts      # Document upload hook
-│   │
-│   ├── public/
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── next.config.js
-│   └── Dockerfile
 │
-├── extension/                       # Chrome browser extension
-│   ├── manifest.json                # MV3 manifest
-│   ├── content.js                   # Page injection, DOM observers
-│   ├── background.js                # Service worker, API communication
-│   ├── popup.html                   # Extension popup settings
-│   ├── popup.js                     # Popup logic
-│   ├── overlay.js                   # Risk badge + analysis panel rendering
-│   ├── styles.css                   # Overlay styling
-│   └── icons/                       # Extension icons
-│
-├── docker-compose.yml               # PostgreSQL + Redis + Backend + Frontend
-├── .env.example                     # Required environment variables
-└── .gitignore
+└── extension/                       # Chrome browser extension
 ```
 
 ---
@@ -938,12 +715,16 @@ AI_HallicunationDetectionSystem/
 
 ### Prerequisites
 
-- **Python 3.11+**
-- **Node.js 18+**
-- **Docker & Docker Compose** (for PostgreSQL + Redis)
+- **Python 3.13+**
+- **Docker & Docker Compose** (for PostgreSQL)
+- **NVIDIA GPU** with driver ≥ 556.12 (for CUDA 12.4 NLI inference)
+- **NVIDIA Container Toolkit** (for GPU passthrough in Docker)
 - **Ollama** (for local embedding model)
-- **GPU**: NVIDIA RTX 4050 6GB or equivalent (for DeBERTa NLI inference)
-- **API Keys**: Gemini (claim extraction), Tavily (web search), + keys for chat LLMs (OpenAI, Anthropic, Google)
+- **API Keys** (all free):
+  - **Groq** — `console.groq.com` (claim extraction + chat)
+  - **Tavily** — `tavily.com` (web search)
+  - **NVIDIA NIM** — `build.nvidia.com` (chat)
+  - **OpenRouter** — `openrouter.ai` (chat)
 
 ### Quick Start
 
@@ -952,8 +733,8 @@ AI_HallicunationDetectionSystem/
 git clone <repo-url>
 cd AI_HallicunationDetectionSystem
 
-# 2. Start infrastructure (PostgreSQL + Redis)
-docker-compose up -d postgres redis
+# 2. Start infrastructure (PostgreSQL)
+docker compose up -d postgres
 
 # 3. Pull the embedding model via Ollama
 ollama pull nomic-embed-text
@@ -962,59 +743,58 @@ ollama pull nomic-embed-text
 cd backend
 python -m venv venv
 venv\Scripts\activate            # Windows
-pip install -r requirements.txt
-python -m spacy download en_core_web_trf
+# source venv/bin/activate       # Linux/Mac
 
-# Download DeBERTa NLI model (first run auto-downloads from HuggingFace)
-# Or pre-download: python -c "from transformers import AutoModel; AutoModel.from_pretrained('cross-encoder/nli-deberta-v3-base')"
+# Install PyTorch with CUDA support
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+# Install remaining dependencies
+pip install -r requirements.txt
+python -m spacy download en_core_web_sm
 
 # 5. Configure environment
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your free API keys (Groq, Tavily, NVIDIA, OpenRouter)
 
 # 6. Run database migrations
 alembic upgrade head
 
 # 7. Start backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# API docs at http://localhost:8000/docs
+```
 
-# 8. Frontend setup (new terminal)
-cd frontend
-npm install
-npm run dev
+### Docker (Full Stack with GPU)
 
-# 9. Extension (load unpacked in Chrome)
-# Go to chrome://extensions → Developer mode → Load unpacked → select extension/
+```bash
+# Build and start everything (PostgreSQL + Backend with GPU)
+docker compose up --build
+
+# Backend will be at http://localhost:8000
+# Requires NVIDIA Container Toolkit for GPU passthrough
 ```
 
 ### Environment Variables
 
 ```env
-# Database
-DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/hallucination_db
+# Groq (claim extraction + chat)
+GROQ_API_KEY=your_groq_api_key
 
-# Redis
-REDIS_URL=redis://localhost:6379/0
+# NVIDIA NIM (chat)
+NVIDIA_API_KEY=your_nvidia_api_key
 
-# Ollama (local embeddings)
-OLLAMA_BASE_URL=http://localhost:11434
+# OpenRouter (chat)
+OPENROUTER_API_KEY=your_openrouter_api_key
 
-# LLM API Keys (for chat + claim extraction)
-GOOGLE_API_KEY=your_gemini_api_key
-OPENAI_API_KEY=your_openai_api_key
-ANTHROPIC_API_KEY=your_anthropic_api_key
-
-# Web Search
+# Tavily (web search)
 TAVILY_API_KEY=your_tavily_api_key
+```
 
-# NLI Model
-NLI_MODEL_NAME=cross-encoder/nli-deberta-v3-base
-NLI_DEVICE=cuda    # or "cpu" if no GPU
+### Running Tests
 
-# Pipeline Config
-CLAIM_CONFIDENCE_THRESHOLD=0.3
-WEB_SEARCH_ENABLED=true
-MAX_CLAIMS_PER_RESPONSE=20
+```powershell
+cd backend\tests
+.\run_tests.ps1
 ```
 
 ---

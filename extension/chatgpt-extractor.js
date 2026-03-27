@@ -601,10 +601,6 @@
     };
 
     console.log("[ChatGPT Extractor][Page] Extracted conversation payload:", payload);
-    console.log(
-      "[ChatGPT Extractor][Page] Extracted conversation payload JSON:\n" +
-        JSON.stringify(payload, null, 2)
-    );
 
     return payload;
   }

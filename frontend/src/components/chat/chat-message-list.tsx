@@ -17,10 +17,10 @@ export function ChatMessageList({ messages, compactMode }: ChatMessageListProps)
   }, [messages]);
 
   return (
-    <ScrollArea className="flex-1 w-full h-full pb-4">
-      <div className={cn("flex flex-col gap-6 justify-end mx-auto px-4 w-full h-full", !compactMode && "max-w-4xl py-8")}>
+    <ScrollArea className="h-full w-full pr-4">
+      <div className={cn("flex flex-col mx-auto px-4 w-full pb-4", !compactMode && "max-w-4xl py-8")}>
         {messages.length === 0 ? (
-          <div className="flex-1 flex flex-col justify-center items-center text-center text-[#75757c] font-light mt-20 px-8">
+          <div className="flex flex-col justify-center items-center text-center text-[#75757c] font-light mt-20 px-8 h-full">
             <p className="text-sm">Initiate conversation to stream model analysis.</p>
           </div>
         ) : (
