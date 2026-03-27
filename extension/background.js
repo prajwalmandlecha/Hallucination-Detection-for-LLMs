@@ -260,10 +260,7 @@ async function sendChatPayloadToBackend(payload, platform) {
       sync: preparedPayload.payload.incrementalSync,
       preparedPayload: preparedPayload.payload,
       advancedWithoutBackend: true
-      reason: "BACKEND_CHAT_URL is not configured.",
-      sync: preparedPayload.payload.incrementalSync,
-      preparedPayload: preparedPayload.payload,
-      advancedWithoutBackend: true
+
     };
   }
 
@@ -288,18 +285,12 @@ async function sendChatPayloadToBackend(payload, platform) {
       response: responseBody,
       sync: preparedPayload.payload.incrementalSync,
       preparedPayload: preparedPayload.payload
-      response: responseBody,
-      sync: preparedPayload.payload.incrementalSync,
-      preparedPayload: preparedPayload.payload
     };
   } catch (error) {
     return {
       attempted: true,
       ok: false,
       status: "network_error",
-      error: String(error),
-      sync: preparedPayload.payload.incrementalSync,
-      preparedPayload: preparedPayload.payload
       error: String(error),
       sync: preparedPayload.payload.incrementalSync,
       preparedPayload: preparedPayload.payload
