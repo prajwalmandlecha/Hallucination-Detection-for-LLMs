@@ -53,6 +53,57 @@ export interface DetectionResult {
   };
 }
 
+export interface Conversation {
+  id: string;
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    model_id?: string;
+    created_at: string;
+  }>;
+  metadata: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchConversations(): Promise<Conversation[]> {
+  const res = await fetch(`${API_BASE}/conversations`);
+  if (!res.ok) throw new Error("Failed to fetch conversations");
+  return res.json() as Promise<Conversation[]>;
+}
+
+export async function getConversation(id: string): Promise<Conversation> {
+  const res = await fetch(`${API_BASE}/conversations/${id}`);
+  if (!res.ok) throw new Error("Failed to load conversation");
+  return res.json() as Promise<Conversation>;
+}
+
+export async function createConversation(title: string = "New Session"): Promise<Conversation> {
+  const res = await fetch(`${API_BASE}/conversations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ metadata: { title } })
+  });
+  if (!res.ok) throw new Error("Failed to create conversation");
+  return res.json() as Promise<Conversation>;
+}
+
+export async function addMessageToConversation(
+  convId: string,
+  role: "user" | "assistant",
+  content: string,
+  modelId?: string
+) {
+  const res = await fetch(`${API_BASE}/conversations/${convId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role, content, model_id: modelId })
+  });
+  if (!res.ok) throw new Error("Failed to add message");
+  return res.json();
+}
+
 /** Fetch all available models from the backend. */
 export async function fetchModels(): Promise<BackendModel[]> {
   const res = await fetch(`${API_BASE}/models`);

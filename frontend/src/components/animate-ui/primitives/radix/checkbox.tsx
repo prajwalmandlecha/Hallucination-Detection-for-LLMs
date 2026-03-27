@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { Checkbox as CheckboxPrimitive } from 'radix-ui';
-import { motion, SVGMotionProps, type HTMLMotionProps } from 'motion/react';
+import { motion, type HTMLMotionProps, type SVGMotionProps } from 'motion/react';
 
 import { getStrictContext } from '@/lib/get-strict-context';
 import { useControlledState } from '@/hooks/use-controlled-state';
@@ -36,7 +36,11 @@ function Checkbox({
 
   return (
     <CheckboxProvider value={{ isChecked, setIsChecked }}>
-      <CheckboxPrimitive.Root defaultChecked={defaultChecked} checked={checked} onCheckedChange={setIsChecked} disabled={disabled} required={required} name={name} value={value} render={<motion.button data-slot="checkbox" whileTap={{ scale: 0.95 }} whileHover={{ scale: 1.05 }} {...props} />}></CheckboxPrimitive.Root>
+      <CheckboxPrimitive.Root defaultChecked={defaultChecked} checked={checked} onCheckedChange={setIsChecked} disabled={disabled} required={required} name={name} value={value} asChild>
+        <motion.button data-slot="checkbox" whileTap={{ scale: 0.95 }} whileHover={{ scale: 1.05 }} {...props}>
+          {props.children}
+        </motion.button>
+      </CheckboxPrimitive.Root>
     </CheckboxProvider>
   );
 }
@@ -47,7 +51,9 @@ function CheckboxIndicator(props: CheckboxIndicatorProps) {
   const { isChecked } = useCheckbox();
 
   return (
-    <CheckboxPrimitive.Indicator forceMount render={<motion.svg data-slot="checkbox-indicator" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="3.5" stroke="currentColor" initial="unchecked" animate={isChecked ? 'checked' : 'unchecked'} {...props} />}>{isChecked === 'indeterminate' ? (
+    <CheckboxPrimitive.Indicator forceMount asChild>
+      <motion.svg data-slot="checkbox-indicator" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="3.5" stroke="currentColor" initial="unchecked" animate={isChecked ? 'checked' : 'unchecked'} {...props}>
+        {isChecked === 'indeterminate' ? (
                 <motion.line
                   x1="5"
                   y1="12"
@@ -84,7 +90,9 @@ function CheckboxIndicator(props: CheckboxIndicatorProps) {
                     },
                   }}
                 />
-              )}</CheckboxPrimitive.Indicator>
+              )}
+      </motion.svg>
+    </CheckboxPrimitive.Indicator>
   );
 }
 

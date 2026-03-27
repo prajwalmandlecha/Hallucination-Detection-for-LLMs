@@ -93,7 +93,7 @@ export function ChatMessageBubble({ role, content, spans, timestamp, compactMode
                 {spans.filter((s) => s.risk !== "none").map((badSpan, idx) => (
                   <TooltipProvider key={idx} delay={0}>
                     <Tooltip>
-                      <TooltipTrigger asChild>
+                      <TooltipTrigger>
                         <Badge variant="outline" className={cn("cursor-help text-[10px] uppercase font-medium tracking-wide border shadow-sm px-1.5 py-0 h-4", riskToBadgeColors[badSpan.risk])}>
                           {badSpan.risk === "red" ? "High Risk" : badSpan.risk === "amber" ? "Elevated Risk" : "Verified"}
                         </Badge>

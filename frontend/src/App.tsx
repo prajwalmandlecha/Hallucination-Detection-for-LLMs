@@ -5,7 +5,7 @@ import { SidebarProvider, SidebarInset } from "@/components/animate-ui/component
 import { ThemeProvider } from "@/components/theme-provider";
 
 function App() {
-  const [activeChatId, setActiveChatId] = useState<string>("chat-1");
+  const [activeChatId, setActiveChatId] = useState<string>("");
 
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme" attribute="class">
