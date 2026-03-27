@@ -5,14 +5,17 @@
 	const STYLE_ID = "hd-highlight-style";
 	const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "CODE", "PRE", "MARK", "NOSCRIPT", "TEXTAREA"]);
 
+	// Escapes user text so it can be used safely inside a RegExp.
 	function escapeRegExp(value) {
 		return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	}
 
+	// Normalizes sentence text for matching and deduping.
 	function normalizeSentence(value) {
 		return String(value || "").replace(/\s+/g, " ").trim();
 	}
 
+	// Clears previously injected highlight marks before a fresh pass.
 	function removeExistingHighlights() {
 		const highlights = document.querySelectorAll(`.${HIGHLIGHT_CLASS}`);
 		highlights.forEach((node) => {
@@ -26,6 +29,7 @@
 		});
 	}
 
+	// Creates the shared tooltip element if it does not already exist.
 	function ensureTooltip() {
 		let tooltip = document.getElementById(TOOLTIP_ID);
 		if (!tooltip) {
@@ -37,6 +41,7 @@
 		return tooltip;
 	}
 
+	// Removes the shared tooltip when the page is reset.
 	function removeTooltip() {
 		const tooltip = document.getElementById(TOOLTIP_ID);
 		if (tooltip) {
@@ -44,6 +49,7 @@
 		}
 	}
 
+	// Injects the styles used by the highlights and tooltip.
 	function ensureStyles() {
 		if (document.getElementById(STYLE_ID)) {
 			return;
@@ -87,6 +93,7 @@
 		document.head.appendChild(style);
 	}
 
+	// Keeps the tooltip within the viewport while following the pointer.
 	function setTooltipPosition(tooltip, clientX, clientY) {
 		const offset = 14;
 		const viewportWidth = window.innerWidth;
@@ -110,6 +117,7 @@
 		tooltip.style.top = `${top}px`;
 	}
 
+	// Binds delegated hover handlers once for all highlight marks.
 	function bindTooltipEvents() {
 		if (document.body.getAttribute(ROOT_ATTR) === "bound") {
 			return;
@@ -163,10 +171,12 @@
 		document.body.setAttribute(ROOT_ATTR, "bound");
 	}
 
+	// Returns assistant message containers in DOM order.
 	function getAssistantMessageNodes() {
 		return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
 	}
 
+	// Narrows matching to a specific assistant message when metadata provides one.
 	function getTargetContainers(statementMeta, assistantNodes) {
 		const assistantRoleIndex = Number.parseInt(statementMeta.assistantRoleIndex, 10);
 		if (Number.isInteger(assistantRoleIndex) && assistantNodes[assistantRoleIndex]) {
@@ -176,6 +186,7 @@
 		return assistantNodes;
 	}
 
+	// Collects searchable text nodes while skipping code and already highlighted regions.
 	function getTextNodes(container) {
 		const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
 			acceptNode(node) {
@@ -207,6 +218,7 @@
 		return nodes;
 	}
 
+	// Replaces matching text inside one text node with highlighted markup.
 	function highlightInTextNode(textNode, statementMeta) {
 		const text = textNode.nodeValue || "";
 		const sentence = normalizeSentence(statementMeta.statement);
@@ -257,6 +269,7 @@
 		return matchCount;
 	}
 
+	// Applies all normalized highlight items to the current ChatGPT conversation.
 	function applyHighlights(statementsWithMeta) {
 		ensureStyles();
 		removeExistingHighlights();

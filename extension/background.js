@@ -1,3 +1,5 @@
+importScripts("highlight-normalizer.js");
+
 const BACKEND_CHAT_URL = "";
 
 const CHATGPT_URL_PREFIXES = [
@@ -5,352 +7,49 @@ const CHATGPT_URL_PREFIXES = [
   "https://chat.openai.com/"
 ];
 
+// Checks whether the active tab points at a supported ChatGPT page.
 function isChatGptConversationUrl(url) {
   return CHATGPT_URL_PREFIXES.some((prefix) => (url || "").startsWith(prefix));
 }
 
-function normalizeComparisonText(value) {
-  return String(value || "").replace(/\s+/g, " ").trim();
-}
-
-function toInteger(value) {
-  const parsedValue = Number.parseInt(value, 10);
-  return Number.isInteger(parsedValue) ? parsedValue : null;
-}
-
-function dedupeStrings(values) {
-  return Array.from(
-    new Set(
-      (values || [])
-        .map((value) => normalizeComparisonText(value))
-        .filter(Boolean)
-    )
-  );
-}
-
-function formatCitation(value) {
-  if (typeof value === "string") {
-    return normalizeComparisonText(value);
-  }
-
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  return normalizeComparisonText(
-    value.title ||
-      value.fileName ||
-      value.displayName ||
-      value.name ||
-      value.label ||
-      value.url ||
-      value.href ||
-      ""
-  ) || null;
-}
-
-function normalizeCitations(item) {
-  return dedupeStrings([
-    ...(Array.isArray(item?.citations) ? item.citations.map(formatCitation) : []),
-    ...(Array.isArray(item?.sources) ? item.sources.map(formatCitation) : []),
-    ...(Array.isArray(item?.evidence) ? item.evidence.map(formatCitation) : []),
-    ...(Array.isArray(item?.references) ? item.references.map(formatCitation) : []),
-    ...(typeof item?.citations === "string" ? [item.citations] : []),
-    ...(typeof item?.sources === "string" ? [item.sources] : []),
-    ...(typeof item?.evidence === "string" ? [item.evidence] : []),
-    ...(typeof item?.references === "string" ? [item.references] : [])
-  ]);
-}
-
-function buildTargetHints(container, inheritedHints = {}) {
-  if (!container || typeof container !== "object") {
-    return inheritedHints;
-  }
-
-  const nextHints = { ...inheritedHints };
-
-  if (container.id != null) {
-    nextHints.messageId = container.id;
-  }
-  if (container.messageId != null) {
-    nextHints.messageId = container.messageId;
-  }
-  if (container.assistantMessageId != null) {
-    nextHints.messageId = container.assistantMessageId;
-  }
-  if (container.index != null) {
-    nextHints.messageIndex = container.index;
-  }
-  if (container.messageIndex != null) {
-    nextHints.messageIndex = container.messageIndex;
-  }
-  if (container.assistantRoleIndex != null) {
-    nextHints.assistantRoleIndex = container.assistantRoleIndex;
-  }
-  if (container.responseIndex != null) {
-    nextHints.assistantRoleIndex = container.responseIndex;
-  }
-  if (container.assistantIndex != null) {
-    nextHints.assistantRoleIndex = container.assistantIndex;
-  }
-  if (container.roleIndex != null) {
-    nextHints.roleIndex = container.roleIndex;
-  }
-  if (container.role != null) {
-    nextHints.role = container.role;
-  }
-
-  return nextHints;
-}
-
-function normalizeHighlightItem(item, targetHints) {
-  if (typeof item === "string") {
-    return {
-      ...targetHints,
-      statement: item
-    };
-  }
-
-  if (!item || typeof item !== "object") {
-    return null;
-  }
-
-  return {
-    ...targetHints,
-    ...item
-  };
-}
-
-function collectHighlightEntries(container, targetHints = {}) {
-  const items = [];
-  const keys = ["highlights", "statements", "claims", "items", "annotations", "results"];
-
-  for (const key of keys) {
-    if (!Array.isArray(container?.[key])) {
-      continue;
-    }
-
-    for (const item of container[key]) {
-      const normalizedItem = normalizeHighlightItem(item, targetHints);
-      if (normalizedItem) {
-        items.push(normalizedItem);
-      }
-    }
-  }
-
-  return items;
-}
-
-function collectHighlightCandidates(responseBody) {
-  const items = [];
-  const visited = new Set();
-
-  function visit(container, inheritedHints = {}) {
-    if (!container || typeof container !== "object" || visited.has(container)) {
-      return;
-    }
-
-    visited.add(container);
-
-    if (Array.isArray(container)) {
-      for (const item of container) {
-        const normalizedItem = normalizeHighlightItem(item, inheritedHints);
-        if (normalizedItem) {
-          items.push(normalizedItem);
-        }
-      }
-      return;
-    }
-
-    const targetHints = buildTargetHints(container, inheritedHints);
-    const directItem = normalizeHighlightItem(container, targetHints);
-    if (
-      directItem &&
-      (directItem.statement || directItem.claim || directItem.sentence)
-    ) {
-      items.push(directItem);
-    }
-    items.push(...collectHighlightEntries(container, targetHints));
-
-    for (const key of ["data", "result"]) {
-      if (container[key] && typeof container[key] === "object") {
-        visit(container[key], targetHints);
-      }
-    }
-
-    for (const key of ["messages", "responses"]) {
-      if (!Array.isArray(container[key])) {
-        continue;
-      }
-
-      for (const nestedContainer of container[key]) {
-        if (!nestedContainer || typeof nestedContainer !== "object") {
-          continue;
-        }
-
-        const nestedTargetHints = buildTargetHints(nestedContainer, targetHints);
-        visit(nestedContainer, nestedTargetHints);
-      }
-    }
-  }
-
-  visit(responseBody);
-  return items;
-}
-
-function resolveAssistantRoleIndices(item, statement, assistantMessages) {
-  const indices = new Set();
-
-  for (const directIndex of [
-    item?.assistantRoleIndex,
-    item?.responseIndex,
-    item?.assistantIndex
-  ]) {
-    const parsedIndex = toInteger(directIndex);
-    if (parsedIndex !== null) {
-      indices.add(parsedIndex);
-    }
-  }
-
-  const roleIndex = toInteger(item?.roleIndex);
-  if (roleIndex !== null && (item?.role === "assistant" || item?.messageRole === "assistant")) {
-    indices.add(roleIndex);
-  }
-
-  const messageIndex = toInteger(item?.messageIndex);
-  if (messageIndex !== null) {
-    for (const message of assistantMessages) {
-      if (message.index === messageIndex) {
-        indices.add(message.roleIndex);
-      }
-    }
-  }
-
-  const messageId = item?.messageId || item?.assistantMessageId || item?.id || null;
-  if (messageId) {
-    for (const message of assistantMessages) {
-      if (message.id === messageId) {
-        indices.add(message.roleIndex);
-      }
-    }
-  }
-
-  const explicitMatches = Array.from(indices).filter((candidateIndex) =>
-    assistantMessages.some((message) => message.roleIndex === candidateIndex)
-  );
-
-  if (explicitMatches.length) {
-    return explicitMatches;
-  }
-
-  const normalizedStatement = normalizeComparisonText(statement).toLowerCase();
-  if (!normalizedStatement) {
-    return [];
-  }
-
-  return assistantMessages
-    .filter((message) =>
-      normalizeComparisonText(message.text).toLowerCase().includes(normalizedStatement)
-    )
-    .map((message) => message.roleIndex);
-}
-
-function buildHighlightPayloadFromBackend(backendResult, extractedConversation) {
-  if (!backendResult?.ok || !backendResult.response) {
-    return [];
-  }
-
-  const assistantMessages = (extractedConversation?.messages || []).filter(
-    (message) => message.role === "assistant"
-  );
-  const rawItems = collectHighlightCandidates(backendResult.response);
-  const highlightItems = [];
-  const seen = new Set();
-
-  for (const item of rawItems) {
-    const statement = normalizeComparisonText(
-      item?.statement || item?.claim || item?.sentence || item?.text || item?.content || ""
-    );
-
-    if (!statement) {
-      continue;
-    }
-
-    const targetIndices = resolveAssistantRoleIndices(item, statement, assistantMessages);
-    if (!targetIndices.length) {
-      continue;
-    }
-
-    const score =
-      item?.score ??
-      item?.riskScore ??
-      item?.risk ??
-      item?.hallucinationScore ??
-      item?.confidence ??
-      item?.probability ??
-      "N/A";
-
-    const note = normalizeComparisonText(
-      item?.note ||
-        item?.explanation ||
-        item?.reason ||
-        item?.summary ||
-        item?.description ||
-        "No details available."
-    );
-
-    const citations = normalizeCitations(item);
-
-    for (const assistantRoleIndex of targetIndices) {
-      const dedupeKey = `${assistantRoleIndex}::${statement.toLowerCase()}`;
-      if (seen.has(dedupeKey)) {
-        continue;
-      }
-
-      seen.add(dedupeKey);
-      highlightItems.push({
-        assistantRoleIndex,
-        statement,
-        score: String(score),
-        citations,
-        note
-      });
-    }
-  }
-
-  return highlightItems;
-}
-
-async function applyHighlightsInTab(tabId, highlightItems) {
+// Injects the page extractor and returns the structured conversation payload.
+async function extractConversationFromTab(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "ISOLATED",
-    files: ["dom.js"]
+    files: ["chatgpt-extractor.js"]
   });
 
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "ISOLATED",
-    func: (payload) => {
-      if (typeof window.__hdApplyHighlights !== "function") {
+    func: () => {
+      if (typeof window.__hdExtractChatGptConversation !== "function") {
         return {
           ok: false,
-          reason: "Highlighter entrypoint was not found in page context."
+          reason: "Extractor entrypoint was not found in page context."
         };
       }
 
-      const runResult = window.__hdApplyHighlights(payload);
       return {
         ok: true,
-        ...runResult
+        payload: window.__hdExtractChatGptConversation()
       };
-    },
-    args: [highlightItems]
+    }
   });
 
-  return result;
+  if (!result?.ok) {
+    throw new Error(result?.reason || "Extraction script did not return a payload.");
+  }
+
+  if (!result.payload) {
+    throw new Error("No extraction payload was returned from the page.");
+  }
+
+  return result.payload;
 }
 
+// Sends the extracted payload to the optional backend for scoring or analysis.
 async function sendChatPayloadToBackend(payload) {
   if (!BACKEND_CHAT_URL) {
     return {
@@ -391,666 +90,38 @@ async function sendChatPayloadToBackend(payload) {
   }
 }
 
-function extractChatGptConversationFromPage() {
-  const extractionErrors = [];
-
-  function recordExtractionError(step, error) {
-    extractionErrors.push({
-      step,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
-
-  function normalizeText(value) {
-    return String(value || "")
-      .replace(/\u00a0/g, " ")
-      .replace(/\r/g, "")
-      .replace(/[ \t]+\n/g, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .replace(/[ \t]{2,}/g, " ")
-      .trim();
-  }
-
-  function getConversationId() {
-    return window.location.pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
-  }
-
-  function getConversationTitle() {
-    const rawTitle = document.title.replace(/\s*-\s*ChatGPT\s*$/i, "");
-    const title = normalizeText(rawTitle);
-    return title || null;
-  }
-
-  function getMessageScope(node) {
-    return node.closest("article") || node;
-  }
-
-  function getMessageContentRoot(node) {
-    const scope = getMessageScope(node);
-    const selectors = [
-      "[data-message-content]",
-      "[data-testid='conversation-turn-content']",
-      ".markdown",
-      "[class*='markdown']",
-      "[class*='prose']",
-      "[class*='whitespace-pre-wrap']"
-    ];
-
-    for (const selector of selectors) {
-      const match = scope.querySelector(selector);
-      if (match) {
-        return match;
-      }
-    }
-
-    return node;
-  }
-
-  function extractMessageText(node) {
-    try {
-      const contentRoot = getMessageContentRoot(node);
-      const text = normalizeText(contentRoot.innerText || contentRoot.textContent || "");
-      return text || null;
-    } catch (error) {
-      recordExtractionError("extract_message_text", error);
-      return null;
-    }
-  }
-
-  function collectCanvasItems(node, baseText) {
-    const scope = getMessageScope(node);
-    const lowerBaseText = normalizeText(baseText).toLowerCase();
-
-    return Array.from(scope.querySelectorAll("canvas"))
-      .map((canvas, index) => {
-        const rawCandidates = [
-          canvas.getAttribute("aria-label"),
-          canvas.getAttribute("aria-description"),
-          canvas.getAttribute("title"),
-          canvas.getAttribute("alt"),
-          canvas.textContent,
-          canvas.closest("figure")?.querySelector("figcaption")?.textContent,
-          canvas.previousElementSibling?.textContent,
-          canvas.nextElementSibling?.textContent
-        ];
-
-        const textCandidates = Array.from(
-          new Set(
-            rawCandidates
-              .map((value) => normalizeText(value))
-              .filter(
-                (value) =>
-                  value &&
-                  value.length <= 300 &&
-                  (!lowerBaseText || !lowerBaseText.includes(value.toLowerCase()))
-              )
-          )
-        );
-
-        const text = normalizeText(textCandidates.join(" | ")) || null;
-        const width = Number.isFinite(canvas.width) ? canvas.width : null;
-        const height = Number.isFinite(canvas.height) ? canvas.height : null;
-        const dataTestId = normalizeText(canvas.getAttribute("data-testid") || "") || null;
-
-        if (!text && !width && !height && !dataTestId) {
-          return null;
-        }
-
-        return {
-          index,
-          type: "canvas",
-          text,
-          width,
-          height,
-          dataTestId
-        };
-      })
-      .filter(Boolean);
-  }
-
-  function buildCanvasAppendix(canvasItems) {
-    if (!canvasItems.length) {
-      return null;
-    }
-
-    return normalizeText(
-      canvasItems
-        .map((canvasItem) => {
-          const parts = [];
-
-          if (canvasItem.text) {
-            parts.push(canvasItem.text);
-          }
-
-          if (canvasItem.width || canvasItem.height) {
-            parts.push(
-              `size ${canvasItem.width || "unknown"}x${canvasItem.height || "unknown"}`
-            );
-          }
-
-          if (!parts.length) {
-            parts.push("canvas content present");
-          }
-
-          return `[Canvas ${canvasItem.index + 1}] ${parts.join(" | ")}`;
-        })
-        .join("\n")
-    );
-  }
-
-  function isVisibleElement(element) {
-    if (!(element instanceof HTMLElement)) {
-      return false;
-    }
-
-    const style = window.getComputedStyle(element);
-    return (
-      style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      style.opacity !== "0"
-    );
-  }
-
-  function getCanvasDocumentTitle(element) {
-    return (
-      normalizeText(
-        element.getAttribute("aria-label") ||
-          element.getAttribute("title") ||
-          element.getAttribute("data-testid") ||
-          element.closest("[aria-label]")?.getAttribute("aria-label") ||
-          element.closest("section, aside, div")?.querySelector("h1, h2, h3")?.textContent ||
-          ""
-      ) || null
-    );
-  }
-
-  function isLikelyCanvasDocumentElement(element, text) {
-    if (!(element instanceof HTMLElement) || !text) {
-      return false;
-    }
-
-    if (!isVisibleElement(element)) {
-      return false;
-    }
-
-    if (element.closest("[data-message-author-role]")) {
-      return false;
-    }
-
-    if (element.matches("textarea, input, button")) {
-      return false;
-    }
-
-    if (element.closest("form")) {
-      return false;
-    }
-
-    const descriptor = normalizeText(
-      [
-        element.tagName,
-        element.className,
-        element.getAttribute("data-testid"),
-        element.getAttribute("aria-label"),
-        element.getAttribute("role")
-      ].join(" ")
-    ).toLowerCase();
-
-    const hasCanvasHint =
-      descriptor.includes("canvas") ||
-      descriptor.includes("prosemirror") ||
-      descriptor.includes("editor") ||
-      descriptor.includes("document");
-
-    const hasStructuredText = text.length >= 80 && /[\n\t]/.test(text);
-
-    return hasCanvasHint || (element.isContentEditable && hasStructuredText);
-  }
-
-  function collectCanvasDocumentsFromRoot(rootNode, source) {
-    const selectors = [
-      "[data-testid*='canvas' i]",
-      "[aria-label*='canvas' i]",
-      "[class*='canvas' i]",
-      ".ProseMirror",
-      "[contenteditable='true']",
-      "[role='textbox']"
-    ];
-    const candidates = Array.from(rootNode.querySelectorAll(selectors.join(",")));
-    const documents = [];
-    const seen = new Set();
-
-    for (const element of candidates) {
-      if (!(element instanceof HTMLElement)) {
-        continue;
-      }
-
-      const text = normalizeText(element.innerText || element.textContent || "");
-      if (!isLikelyCanvasDocumentElement(element, text)) {
-        continue;
-      }
-
-      const dedupeKey = text.toLowerCase();
-      if (seen.has(dedupeKey)) {
-        continue;
-      }
-
-      seen.add(dedupeKey);
-      documents.push({
-        index: documents.length,
-        type: "canvas_document",
-        source,
-        title: getCanvasDocumentTitle(element),
-        text
-      });
-    }
-
-    return documents;
-  }
-
-  function collectPageCanvasDocuments() {
-    const documents = collectCanvasDocumentsFromRoot(document, "document");
-
-    for (const iframe of Array.from(document.querySelectorAll("iframe"))) {
-      try {
-        const iframeDocument = iframe.contentDocument;
-        if (!iframeDocument) {
-          continue;
-        }
-
-        const iframeDocuments = collectCanvasDocumentsFromRoot(iframeDocument, "iframe");
-        for (const item of iframeDocuments) {
-          documents.push({
-            ...item,
-            index: documents.length
-          });
-        }
-      } catch {
-        continue;
-      }
-    }
-
-    const seen = new Set();
-    return documents.filter((item) => {
-      const dedupeKey = item.text.toLowerCase();
-      if (seen.has(dedupeKey)) {
-        return false;
-      }
-
-      seen.add(dedupeKey);
-      return true;
-    });
-  }
-
-  function resolveCanvasTargetMessage(messages, pageCanvasDocuments) {
-    if (!pageCanvasDocuments.length) {
-      return null;
-    }
-
-    const assistantMessages = messages.filter((message) => message.role === "assistant");
-    if (!assistantMessages.length) {
-      return null;
-    }
-
-    const explicitCanvasMessage = [...assistantMessages]
-      .reverse()
-      .find((message) => /\bcanvas\b/i.test(message.text));
-
-    return explicitCanvasMessage || assistantMessages[assistantMessages.length - 1];
-  }
-
-  function appendCanvasDocumentsToMessage(message, pageCanvasDocuments) {
-    if (!message || !pageCanvasDocuments.length) {
-      return message;
-    }
-
-    const canvasItems = [
-      ...(Array.isArray(message.canvasItems) ? message.canvasItems : []),
-      ...pageCanvasDocuments.map((item, index) => ({
-        ...item,
-        index: (message.canvasItems || []).length + index
-      }))
-    ];
-    const canvasAppendix = normalizeText(
-      pageCanvasDocuments
-        .map((item) =>
-          normalizeText(
-            `[Canvas Document ${item.index + 1}]${item.title ? ` ${item.title}` : ""}\n${item.text}`
-          )
-        )
-        .join("\n\n")
-    );
-    const text = normalizeText([message.text, canvasAppendix].filter(Boolean).join("\n\n")) || null;
-
-    return {
-      ...message,
-      text,
-      canvasItems,
-      canvasCount: canvasItems.length
-    };
-  }
-
-  function extractMessageContent(node) {
-    const baseText = extractMessageText(node) || "";
-    const canvasItems = collectCanvasItems(node, baseText);
-    const canvasAppendix = buildCanvasAppendix(canvasItems);
-    const text = normalizeText([baseText, canvasAppendix].filter(Boolean).join("\n\n")) || null;
-
-    return {
-      text,
-      canvasItems
-    };
-  }
-
-  function unwrapExternalUrl(rawHref) {
-    try {
-      const parsedUrl = new URL(rawHref, window.location.href);
-      const nestedUrlParams = ["url", "u", "target", "q"];
-
-      for (const param of nestedUrlParams) {
-        const nestedUrlValue = parsedUrl.searchParams.get(param);
-        if (!nestedUrlValue) {
-          continue;
-        }
-
-        try {
-          const nestedUrl = new URL(nestedUrlValue, window.location.href);
-          if (/^https?:$/i.test(nestedUrl.protocol)) {
-            return nestedUrl.toString();
-          }
-        } catch {
-          continue;
-        }
-      }
-
-      return parsedUrl.toString();
-    } catch {
-      return null;
-    }
-  }
-
-  function isSupportedSourceUrl(url) {
-    try {
-      const parsedUrl = new URL(url);
-      const isHttp = /^https?:$/i.test(parsedUrl.protocol);
-      const isInternalHost =
-        parsedUrl.hostname === "chatgpt.com" ||
-        parsedUrl.hostname === "chat.openai.com";
-
-      return isHttp && !isInternalHost;
-    } catch {
-      return false;
-    }
-  }
-
-  function buildSource(anchor) {
-    const rawUrl = anchor.getAttribute("href") || "";
-    const normalizedUrl = unwrapExternalUrl(rawUrl);
-
-    if (!normalizedUrl || !isSupportedSourceUrl(normalizedUrl)) {
-      return null;
-    }
-
-    let host = null;
-    try {
-      host = new URL(normalizedUrl).hostname;
-    } catch {
-      host = null;
-    }
-
-    const title = normalizeText(
-      anchor.innerText ||
-        anchor.textContent ||
-        anchor.getAttribute("title") ||
-        anchor.getAttribute("aria-label") ||
-        ""
-    );
-
-    const citationMatch = title.match(/^\[(\d+)\]$/);
-
-    return {
-      title: title || null,
-      url: normalizedUrl,
-      host,
-      citationLabel: citationMatch ? citationMatch[1] : null,
-      rawUrl: rawUrl && rawUrl !== normalizedUrl ? rawUrl : null
-    };
-  }
-
-  function collectSources(node) {
-    const scope = getMessageScope(node);
-    const anchors = Array.from(scope.querySelectorAll("a[href]"));
-    const dedupedSources = [];
-    const seen = new Set();
-
-    for (const anchor of anchors) {
-      const source = buildSource(anchor);
-      if (!source) {
-        continue;
-      }
-
-      const dedupeKey = `${source.url}::${source.title || ""}`;
-      if (seen.has(dedupeKey)) {
-        continue;
-      }
-
-      seen.add(dedupeKey);
-      dedupedSources.push(source);
-    }
-
-    return dedupedSources.map((source, index) => ({
-      ...source,
-      type: "web",
-      index
-    }));
-  }
-
-  function extractUploadedFilesFromText(text) {
-    const fileNameMatches = normalizeText(text).match(
-      /\b[^\\/:*?"<>|\n]+\.(pdf|docx?|pptx?|xlsx?|csv|txt)\b/gi
-    );
-
-    return Array.from(
-      new Set((fileNameMatches || []).map((fileName) => normalizeText(fileName)).filter(Boolean))
-    ).map((fileName) => {
-      const extension = fileName.split(".").pop()?.toLowerCase() || null;
-      const displayName = normalizeText(fileName.replace(/\.[^.]+$/, ""));
-
-      return {
-        fileName,
-        displayName,
-        extension
-      };
-    });
-  }
-
-  function escapeRegExp(value) {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
-  function collectReferencedUploads(text, uploadedFiles) {
-    const normalizedMessageText = normalizeText(text);
-
-    if (!normalizedMessageText) {
-      return [];
-    }
-
-    return uploadedFiles
-      .filter((file) => {
-        const candidates = [file.fileName, file.displayName].filter(Boolean);
-        return candidates.some((candidate) =>
-          new RegExp(`(^|\\b)${escapeRegExp(candidate)}(\\b|$)`, "i").test(normalizedMessageText)
-        );
-      })
-      .map((file, index) => ({
-        index,
-        type: "upload",
-        title: file.fileName,
-        fileName: file.fileName,
-        displayName: file.displayName,
-        extension: file.extension,
-        url: null,
-        host: null,
-        citationLabel: null,
-        rawUrl: null
-      }));
-  }
-
-  function mergeSources(webSources, uploadSources) {
-    const mergedSources = [];
-    const seen = new Set();
-
-    for (const source of [...webSources, ...uploadSources]) {
-      const dedupeKey = `${source.type}::${source.url || source.fileName || source.title || ""}`;
-      if (seen.has(dedupeKey)) {
-        continue;
-      }
-
-      seen.add(dedupeKey);
-      mergedSources.push(source);
-    }
-
-    return mergedSources.map((source, index) => ({
-      ...source,
-      index
-    }));
-  }
-
-  function getDomId(node) {
-    const scope = getMessageScope(node);
-    const candidateIds = [
-      node.getAttribute("data-testid"),
-      scope.getAttribute("data-testid"),
-      node.id,
-      scope.id
-    ]
-      .map((value) => normalizeText(value))
-      .filter(Boolean);
-
-    return candidateIds[0] || null;
-  }
-
-  function extractMessages() {
-    const turnNodes = Array.from(document.querySelectorAll("[data-message-author-role]"));
-    const roleCounts = {
-      user: 0,
-      assistant: 0,
-      system: 0,
-      tool: 0,
-      unknown: 0
-    };
-
-    return turnNodes
-      .map((node, index) => {
-        const role = node.getAttribute("data-message-author-role") || "unknown";
-        const roleIndex = roleCounts[role] ?? 0;
-        roleCounts[role] = roleIndex + 1;
-
-        const { text, canvasItems } = extractMessageContent(node);
-
-        if (!text) {
-          return null;
-        }
-
-        return {
-          index,
-          id: getDomId(node) || `${role}-${roleIndex}`,
-          role,
-          roleIndex,
-          text,
-          canvasItems,
-          canvasCount: canvasItems.length,
-          webSources: role === "assistant" ? collectSources(node) : []
-        };
-      })
-      .filter(Boolean);
-  }
-
-  const pageCanvasDocuments = collectPageCanvasDocuments();
-  const extractedMessages = extractMessages();
-  const canvasTargetMessage = resolveCanvasTargetMessage(extractedMessages, pageCanvasDocuments);
-  const baseMessages = extractedMessages.map((message) =>
-    canvasTargetMessage && message.id === canvasTargetMessage.id
-      ? appendCanvasDocumentsToMessage(message, pageCanvasDocuments)
-      : message
-  );
-  const userMessages = baseMessages.filter((message) => message.role === "user");
-  const uploadedFiles = userMessages.flatMap((message) => extractUploadedFilesFromText(message.text));
-  const dedupedUploadedFiles = Array.from(
-    new Map(uploadedFiles.map((file) => [file.fileName.toLowerCase(), file])).values()
-  );
-
-  const messages = baseMessages.map((message) => {
-    const uploadSources =
-      message.role === "assistant"
-        ? collectReferencedUploads(message.text, dedupedUploadedFiles)
-        : [];
-    const sources =
-      message.role === "assistant"
-        ? mergeSources(message.webSources || [], uploadSources)
-        : [];
-
-    const { webSources, ...rest } = message;
-
-    return {
-      ...rest,
-      sources,
-      sourceCount: sources.length
-    };
+// Injects the DOM highlighter and applies the normalized highlight payload.
+async function applyHighlightsInTab(tabId, highlightItems) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    files: ["dom.js"]
   });
 
-  const assistantMessages = messages.filter((message) => message.role === "assistant");
-  const totalCanvasCount = messages.reduce(
-    (count, message) => count + (message.canvasCount || 0),
-    0
-  );
-  const totalSourceCount = assistantMessages.reduce(
-    (count, message) => count + message.sourceCount,
-    0
-  );
-  const totalWebSourceCount = assistantMessages.reduce(
-    (count, message) => count + message.sources.filter((source) => source.type === "web").length,
-    0
-  );
-  const totalUploadReferenceCount = assistantMessages.reduce(
-    (count, message) => count + message.sources.filter((source) => source.type === "upload").length,
-    0
-  );
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    func: (payload) => {
+      if (typeof window.__hdApplyHighlights !== "function") {
+        return {
+          ok: false,
+          reason: "Highlighter entrypoint was not found in page context."
+        };
+      }
 
-  const payload = {
-    schemaVersion: "1.0.0",
-    platform: "chatgpt",
-    extractedAt: new Date().toISOString(),
-    conversation: {
-      id: getConversationId(),
-      url: window.location.href,
-      title: getConversationTitle()
+      const runResult = window.__hdApplyHighlights(payload);
+      return {
+        ok: true,
+        ...runResult
+      };
     },
-    summary: {
-      messageCount: messages.length,
-      userMessageCount: userMessages.length,
-      assistantMessageCount: assistantMessages.length,
-      totalCanvasCount,
-      pageCanvasDocumentCount: pageCanvasDocuments.length,
-      uploadCount: dedupedUploadedFiles.length,
-      totalSourceCount,
-      totalWebSourceCount,
-      totalUploadReferenceCount
-    },
-    uploadedFiles: dedupedUploadedFiles,
-    pageCanvasDocuments,
-    messages,
-    extractionErrors
-  };
+    args: [highlightItems]
+  });
 
-  console.log("[ChatGPT Extractor][Page] Extracted conversation payload:", payload);
-  console.log(
-    "[ChatGPT Extractor][Page] Extracted conversation payload JSON:\n" +
-      JSON.stringify(payload, null, 2)
-  );
-
-  return payload;
+  return result;
 }
 
+// Runs the full extract -> backend -> normalize -> highlight pipeline on click.
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) {
     console.warn("[ChatGPT Extractor] No active tab id was found.");
@@ -1063,21 +134,15 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 
   try {
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      world: "ISOLATED",
-      func: extractChatGptConversationFromPage
-    });
-
-    if (!result) {
-      throw new Error("No extraction result was returned from the page.");
-    }
-
-    const backendResult = await sendChatPayloadToBackend(result);
-    const highlightPayload = buildHighlightPayloadFromBackend(backendResult, result);
+    const extractedConversation = await extractConversationFromTab(tab.id);
+    const backendResult = await sendChatPayloadToBackend(extractedConversation);
+    const highlightPayload = HighlightNormalizer.buildHighlightPayloadFromBackend(
+      backendResult,
+      extractedConversation
+    );
     const highlightingResult = await applyHighlightsInTab(tab.id, highlightPayload);
     const payload = {
-      ...result,
+      ...extractedConversation,
       highlightPayload,
       highlighting: highlightingResult,
       backendForwarding: backendResult
