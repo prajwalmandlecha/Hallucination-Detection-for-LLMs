@@ -1,0 +1,43 @@
+# FastAPI & Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.18
+python-dotenv>=1.0.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+
+# Async Support
+httpx>=0.28.0
+aiofiles>=24.1.0
+
+# Database
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.30.0
+alembic>=1.14.0
+psycopg2-binary>=2.9.10
+pgvector>=0.3.2
+
+# Redis
+redis[hiredis]>=5.2.0
+
+# ML / NLI (runs locally on GPU — no API cost)
+torch>=2.0.0
+transformers>=4.40.0
+sentence-transformers>=3.0.0
+
+# NER (runs locally)
+spacy>=3.8.0
+
+# LLM Providers (ALL FREE APIs)
+openai>=1.50.0
+
+# Embedding (Ollama — runs locally)
+ollama>=0.4.0
+
+# Document Processing
+pypdf>=5.1.0
+python-docx>=1.1.0
+
+# Utilities
+numpy>=2.0.0
+uuid6>=2024.7.1

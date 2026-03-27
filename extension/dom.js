@@ -10,7 +10,7 @@
 	}
 
 	function normalizeSentence(value) {
-		return (value || "").trim();
+		return String(value || "").replace(/\s+/g, " ").trim();
 	}
 
 	function removeExistingHighlights() {
@@ -167,6 +167,15 @@
 		return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
 	}
 
+	function getTargetContainers(statementMeta, assistantNodes) {
+		const assistantRoleIndex = Number.parseInt(statementMeta.assistantRoleIndex, 10);
+		if (Number.isInteger(assistantRoleIndex) && assistantNodes[assistantRoleIndex]) {
+			return [assistantNodes[assistantRoleIndex]];
+		}
+
+		return assistantNodes;
+	}
+
 	function getTextNodes(container) {
 		const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
 			acceptNode(node) {
@@ -205,7 +214,7 @@
 			return 0;
 		}
 
-		const regex = new RegExp(escapeRegExp(sentence), "gi");
+		const regex = new RegExp(escapeRegExp(sentence).replace(/\s+/g, "\\s+"), "gi");
 		if (!regex.test(text)) {
 			return 0;
 		}
@@ -265,7 +274,7 @@
 		const deduped = [];
 		const seen = new Set();
 		for (const item of statementsWithMeta || []) {
-			const key = normalizeSentence(item.statement).toLowerCase();
+			const key = `${normalizeSentence(item.statement).toLowerCase()}::${item.assistantRoleIndex ?? "all"}`;
 			if (!key || seen.has(key)) {
 				continue;
 			}
@@ -276,8 +285,9 @@
 		let highlighted = 0;
 		const matchedStatements = new Set();
 
-		for (const container of assistantNodes) {
-			for (const statementMeta of deduped) {
+		for (const statementMeta of deduped) {
+			const targetContainers = getTargetContainers(statementMeta, assistantNodes);
+			for (const container of targetContainers) {
 				const nodes = getTextNodes(container);
 				for (const textNode of nodes) {
 					const count = highlightInTextNode(textNode, statementMeta);
