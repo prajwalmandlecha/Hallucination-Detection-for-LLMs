@@ -60,27 +60,25 @@ async def lifespan(app: FastAPI):
     # Verify FREE API keys
     has_claim_provider = False
     if settings.groq_api_key:
-        logger.info("✅ Groq key configured (CLAIM EXTRACTION + chat — fastest FREE)")
+        logger.info("✅ Groq key configured")
         has_claim_provider = True
     if settings.nvidia_api_key:
-        logger.info("✅ NVIDIA NIM key configured (1000 free credits)")
+        logger.info("✅ NVIDIA NIM key configured")
         if not has_claim_provider:
             has_claim_provider = True
     if settings.openrouter_api_key:
-        logger.info("✅ OpenRouter key configured (free models)")
+        logger.info("✅ OpenRouter key configured")
         if not has_claim_provider:
             has_claim_provider = True
 
     if not has_claim_provider:
         logger.warning("⚠️  No LLM API key configured — claim extraction won't work!")
-        logger.warning("   Get free Groq key at: https://console.groq.com/keys")
 
     # Web search
     if settings.tavily_api_key:
-        logger.info("✅ Tavily web search configured (1000 free credits)")
+        logger.info("✅ Tavily web search configured")
     else:
         logger.warning("⚠️  Tavily API key not set — web verification disabled")
-        logger.warning("   Get free key at: https://tavily.com")
 
     # Count available providers
     available = sum([
@@ -88,7 +86,7 @@ async def lifespan(app: FastAPI):
         bool(settings.nvidia_api_key),
         bool(settings.openrouter_api_key),
     ])
-    logger.info(f"📊 {available}/3 free LLM providers configured")
+    logger.info(f"📊 {available}/3 LLM providers configured")
 
     logger.info("=" * 60)
     logger.info("🚀 Server ready!")
@@ -118,7 +116,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -188,7 +186,7 @@ async def list_models():
     for model_id, info in settings.supported_models.items():
         api_key_field = info.get("api_key_field")
         is_available = (
-            api_key_field is None  # Ollama (no key needed)
+            api_key_field is None
             or getattr(settings, api_key_field, None) is not None
         )
         models.append({
@@ -197,7 +195,6 @@ async def list_models():
             "provider": info["provider"],
             "tier": info["tier"],
             "available": is_available,
-            "free": info.get("free", True),
             "description": info.get("description", ""),
         })
     return {"models": models}

@@ -125,6 +125,7 @@ async def detect_hallucinations(request: DetectionRequest):
                 type=result.claim.type,
                 risk_score=result.risk_score,
                 status=result.status,
+                suggested_sources=result.claim.suggested_sources,
                 verification_details=verification_details,
             ))
 

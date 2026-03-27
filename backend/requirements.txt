@@ -17,11 +17,11 @@ alembic>=1.14.0
 psycopg2-binary>=2.9.10
 pgvector>=0.3.2
 
-# Redis
-redis[hiredis]>=5.2.0
 
 # ML / NLI (runs locally on GPU — no API cost)
-torch>=2.0.0
+# Install with CUDA: pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# PyTorch 2.6.0+cu124 is the latest compatible with CUDA 12.4 (driver 556.12 max = CUDA 12.5)
+torch==2.6.0
 transformers>=4.40.0
 sentence-transformers>=3.0.0
 

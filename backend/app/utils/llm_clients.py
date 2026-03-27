@@ -1,11 +1,9 @@
 """
 LLM API clients for multi-model chat support.
-
-ALL PROVIDERS ARE FREE:
-- Groq — free tier (OpenAI-compatible, fastest)
-- NVIDIA NIM — free credits via OpenAI-compatible API
-- OpenRouter — free models via OpenAI-compatible API
-- Ollama — fully local
+- Groq
+- NVIDIA NIM
+- OpenRouter
+- Ollama
 """
 
 import logging
@@ -17,13 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """
-    Unified client for multiple FREE LLM providers.
-    
-    Groq, NVIDIA NIM, and OpenRouter all use OpenAI-compatible APIs,
-    so we reuse the same OpenAI client with different base_url and api_key.
-    """
-
     def __init__(self):
         self.settings = get_settings()
         self._clients: dict[str, object] = {}
@@ -31,7 +22,6 @@ class LLMClient:
     def _get_openai_compatible_client(self, provider: str):
         """
         Get an OpenAI-compatible async client for a given provider.
-        
         Groq, NVIDIA NIM, and OpenRouter all support the OpenAI API format.
         """
         if provider in self._clients:
@@ -174,7 +164,7 @@ class LLMClient:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
-    # ── Ollama (LOCAL — fully free) ───────────────────────────────────
+    # ── Ollama  ───────────────────────────────────
 
     async def _chat_ollama(self, model_id: str, message: str, history: list[dict]) -> str:
         import ollama as ollama_lib

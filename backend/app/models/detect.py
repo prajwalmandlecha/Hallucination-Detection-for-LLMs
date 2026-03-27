@@ -155,6 +155,10 @@ class ClaimResultResponse(BaseModel):
     type: ClaimType
     risk_score: float = Field(ge=0, le=100)
     status: ClaimStatus
+    suggested_sources: list[SourceType] = Field(
+        default_factory=list,
+        description="Sources the LLM suggested checking for this claim",
+    )
     verification_details: dict = Field(
         default_factory=dict,
         description="Detailed verification info including NLI scores and evidence",
