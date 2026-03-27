@@ -59,7 +59,12 @@ export function SidebarLayout({
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
-            <SidebarMenuButton size="default" className="text-sec hover:text-pri hover:bg-hover font-medium active:scale-[0.98] transition-all">
+            <SidebarMenuButton 
+              size="default" 
+              onClick={() => onSelectChat("analytics")}
+              isActive={activeChatId === "analytics"}
+              className="text-sec hover:text-pri hover:bg-hover data-[active=true]:bg-hover data-[active=true]:text-amber-500 font-medium active:scale-[0.98] transition-all"
+            >
               <BarChart2 className="w-4 h-4 mr-0.5" />
               <span>Analytics</span>
             </SidebarMenuButton>
