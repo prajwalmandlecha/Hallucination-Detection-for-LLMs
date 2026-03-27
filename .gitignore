@@ -1,0 +1,44 @@
+# AI Hallucination Detection System
+
+## OS / Build
+__pycache__/**
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+## Virtual environments
+venv/
+.venv/
+env
+
+## IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+## Environment
+.env
+*.env.local
+
+## Node
+node_modules/
+.next/
+out/
+
+## Docker
+postgres_data/
+redis_data/
+
+## ML Models (downloaded at runtime)
+*.bin
+*.safetensors
+*.onnx
+
+## OS
+.DS_Store
+Thumbs.db
