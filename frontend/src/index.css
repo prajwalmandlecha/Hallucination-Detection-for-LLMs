@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@source "../node_modules/streamdown/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -80,51 +81,52 @@
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
+    /* Warm cream base — no more stark whites */
+    --background: oklch(0.98 0.005 85);      /* warm parchment page */
+    --foreground: oklch(0.16 0.01 260);
+    --card: oklch(0.975 0.006 80);           /* cream card surface */
+    --card-foreground: oklch(0.16 0.01 260);
+    --popover: oklch(0.975 0.006 80);
+    --popover-foreground: oklch(0.16 0.01 260);
     --primary: oklch(0.205 0 0);
     --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
+    --secondary: oklch(0.955 0.007 80);      /* warm secondary surface */
     --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
+    --muted: oklch(0.955 0.007 80);
+    --muted-foreground: oklch(0.48 0.01 260);
+    --accent: oklch(0.955 0.007 80);
     --accent-foreground: oklch(0.205 0 0);
     --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
+    --border: oklch(0.88 0.009 80);          /* warm sand border */
+    --input: oklch(0.88 0.009 80);
+    --ring: oklch(0.65 0.01 260);
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar: oklch(0.965 0.007 80);        /* warm linen sidebar */
+    --sidebar-foreground: oklch(0.16 0.01 260);
     --sidebar-primary: oklch(0.205 0 0);
     --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent: oklch(0.945 0.008 80);
     --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --sidebar-border: oklch(0.88 0.009 80);
+    --sidebar-ring: oklch(0.65 0.01 260);
 
-    /* Light Mode Custom TruthLens Palette */
-    --app: #f5f5f7;
-    --pane: #ffffff;
-    --msg-user: #f1f3f5;
-    --msg-ai: #f9fafb;
-    --hover: #e9ecef;
-    --tooltip: #ffffff;
-    --text-pri: #111827;
-    --text-sec: #4b5563;
-    --text-mut: #6b7280;
-    --border-subtle: rgba(0,0,0,0.05);
-    --border-strong: rgba(0,0,0,0.15);
+    /* Light Mode Custom TruthLens Palette — warm cream tones */
+    --app: #f5f0eb;          /* warm parchment page bg */
+    --pane: #f9f5f1;         /* slightly lighter cream pane */
+    --msg-user: #ede8e2;     /* warm sand user bubble */
+    --msg-ai: #f2ede8;       /* soft cream AI bubble */
+    --hover: #e8e2db;        /* warm hover highlight */
+    --tooltip: #faf6f2;      /* creamy popover */
+    --text-pri: #1c1917;     /* warm dark almost-black */
+    --text-sec: #44403c;     /* warm stone */
+    --text-mut: #78716c;     /* warm taupe muted */
+    --border-subtle: rgba(120,90,60,0.08);   /* warm tinted subtle border */
+    --border-strong: rgba(120,90,60,0.18);   /* warm tinted strong border */
 
     /* Light Mode Aurora */
     --aurora-1-start: rgba(59, 130, 246, 0.2);

@@ -2,6 +2,7 @@ import React from "react";
 import { ChatInput } from "./chat-input";
 import { ChatMessageList } from "./chat-message-list";
 import type { ChatPaneData, ModelId } from "./chat-container";
+import type { BackendModel } from "@/lib/api";
 import { Plus, X, ArrowRightLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,13 +30,8 @@ interface ChatLayoutProps {
   onChangeModel: (paneId: string, newModelId: ModelId) => void;
   onRemovePane: (paneId: string) => void;
   chatTitle?: string;
+  models?: BackendModel[];
 }
-
-const MODELS = [
-  { id: "gpt-4", title: "GPT-4 Turbo", tag: "OpenAI" },
-  { id: "claude-3", title: "Claude 3 Opus", tag: "Anthropic" },
-  { id: "gemini-1.5", title: "Gemini 1.5 Pro", tag: "Google" },
-] as const;
 
 export function ChatLayout({
   panes,
@@ -45,8 +41,13 @@ export function ChatLayout({
   onChangeModel,
   onRemovePane,
   chatTitle = "Current Session",
+  models = [],
 }: ChatLayoutProps) {
   const isCompact = panes.length > 1;
+
+  // Derive a display-friendly label for a model id
+  const getModelLabel = (modelId: string) =>
+    models.find((m) => m.id === modelId)?.name ?? modelId;
 
   return (
     <div className="flex-1 flex flex-col h-screen relative bg-transparent p-4 gap-4 overflow-hidden w-full max-w-[1800px] mx-auto">
@@ -63,11 +64,11 @@ export function ChatLayout({
       </div>
 
       {/* Dynamic Pane Flexbox Layout */}
-      <div className="flex-1 flex gap-4 overflow-hidden w-full z-10">
+      <div className="flex-1 flex gap-4 overflow-hidden min-h-0 w-full z-10">
         {panes.map((pane, index) => (
           <React.Fragment key={pane.id}>
             <div
-              className="flex-1 flex flex-col relative h-full bg-pane rounded-2xl border border-subtle shadow-[0_8px_30px_rgba(0,0,0,0.5)] overflow-hidden transition-all duration-300"
+              className="flex-1 flex flex-col relative h-full bg-pane rounded-2xl border border-subtle shadow-[0_8px_30px_rgba(0,0,0,0.5)] overflow-hidden min-h-0 transition-all duration-300"
             >
             {/* Aceternity Dot Background */}
             <div
@@ -92,14 +93,16 @@ export function ChatLayout({
                 value={pane.modelId}
                 onValueChange={(val) => onChangeModel(pane.id, val as ModelId)}
               >
-                <SelectTrigger className="w-[180px] h-8 bg-msg-user border-strong text-xs font-semibold focus:ring-1 focus:ring-strong">
-                  <SelectValue placeholder="Select Model" />
+                <SelectTrigger className="w-[200px] h-8 bg-msg-user border-strong text-xs font-semibold focus:ring-1 focus:ring-strong">
+                  <SelectValue placeholder="Select Model">
+                    {getModelLabel(pane.modelId)}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent className="bg-tooltip border-strong text-pri">
-                  {MODELS.map((m) => (
+                  {models.map((m) => (
                     <SelectItem key={m.id} value={m.id} className="text-xs hover:bg-hover focus:bg-hover">
-                      <span className="font-medium mr-2">{m.title}</span>
-                      <span className="text-[10px] text-mut uppercase">{m.tag}</span>
+                      <span className="font-medium mr-2">{m.name}</span>
+                      <span className="text-[10px] text-mut uppercase">{m.provider}</span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -119,7 +122,7 @@ export function ChatLayout({
             </div>
 
             {/* Scrollable Message Content */}
-            <div className="flex-1 overflow-hidden relative z-10">
+            <div className="flex-1 overflow-hidden min-h-0 relative z-10">
               <ChatMessageList messages={pane.messages} compactMode={isCompact} />
             </div>
           </div>

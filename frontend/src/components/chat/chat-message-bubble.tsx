@@ -11,6 +11,8 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Streamdown } from "streamdown";
+import "streamdown/styles.css";
 export type RiskLevel = "none" | "green" | "amber" | "red";
 
 export interface HallucinationSpan {
@@ -35,12 +37,6 @@ const riskToBadgeColors = {
   red: "bg-red-500/10 text-red-500 border-red-500/20",
 };
 
-const riskToHighlightStyles = {
-  none: "",
-  green: "bg-green-500/10 decoration-green-500/50 underline decoration-wavy",
-  amber: "bg-amber-500/20 decoration-amber-500/50 underline decoration-wavy",
-  red: "bg-red-500/20 decoration-red-500/50 underline decoration-wavy text-red-200",
-};
 
 export function ChatMessageBubble({ role, content, spans, timestamp, compactMode }: MessageProps) {
   const isUser = role === "user";
@@ -48,34 +44,12 @@ export function ChatMessageBubble({ role, content, spans, timestamp, compactMode
   // A very simple regex replacer if spans are provided to highlight text.
   // In a real app, this would be an exact token mapper. For now, it highlights if text matches.
   const renderContent = () => {
-    if (!spans || spans.length === 0 || isUser) return content;
-
-    const elements: React.ReactNode[] = [];
-    
-    // Simplistic text splitting for demo purposes
-    // We assume the spans are non-overlapping strings for this mock.
-    let remainingContent = content;
-    
-    spans.forEach((span, idx) => {
-      const parts = remainingContent.split(span.text);
-      if (parts.length > 1) {
-        elements.push(<span key={`text-${idx}`}>{parts[0]}</span>);
-        elements.push(
-          <span 
-            key={`hilite-${idx}`} 
-            className={cn("px-1 py-0.5 rounded-sm transition-colors cursor-help", riskToHighlightStyles[span.risk])}
-            title={span.explanation}
-          >
-            {span.text}
-          </span>
-        );
-        remainingContent = parts.slice(1).join(span.text);
-      }
-    });
-
-    elements.push(<span key="text-end">{remainingContent}</span>);
-
-    return elements.length > 1 ? elements : content;
+    if (isUser) return content;
+    return (
+      <div className="prose dark:prose-invert prose-sm max-w-none break-words prose-p:leading-relaxed prose-pre:p-0">
+        <Streamdown>{content}</Streamdown>
+      </div>
+    );
   };
 
   return (
