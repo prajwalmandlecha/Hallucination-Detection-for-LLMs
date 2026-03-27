@@ -17,19 +17,19 @@ chrome.action.onClicked.addListener(async (tab) => {
   try {
     const statementsWithMeta = [
       {
-        statement: "Here’s a clear breakdown",
+        statement: "hello",
         score: "0.62",
         citations: ["Source A", "Source B"],
         note: "Dummy metadata for hover card. Replace this payload with FastAPI response."
       },
       {
-        statement: "Easiest overall",
+        statement: "bye",
         score: "0.18",
         citations: ["Course PDF", "Cloud docs"],
         note: "Low-risk sentence based on current placeholder scoring."
       },
       {
-        statement: "No coding required",
+        statement: "see",
         score: "0.75",
         citations: ["Observation only"],
         note: "Potentially broad claim. Verify with concrete setup requirements."

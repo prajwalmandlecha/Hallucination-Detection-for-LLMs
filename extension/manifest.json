@@ -3,7 +3,7 @@
   "name": "ChatGPT User Chat Extractor",
   "version": "0.1.0",
   "description": "Detect AI hallucinations in a single click.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",

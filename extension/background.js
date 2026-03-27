@@ -8,6 +8,7 @@ const CHATGPT_URL_PREFIXES = [
   "https://chatgpt.com/",
   "https://chat.openai.com/"
 ];
+const CHAT_SYNC_STORAGE_PREFIX = "chat_sync_state::";
 
 console.log("[ChatGPT Extractor] Background service worker booted:", {
   build: EXTENSION_BUILD_TAG,
@@ -23,6 +24,105 @@ function base64ToUint8Array(base64Value) {
   }
 
   return bytes;
+}
+
+function getConversationSyncKey(payload) {
+  return payload?.conversation?.id || payload?.conversation?.url || null;
+}
+
+function getConversationStorageKey(conversationKey) {
+  return `${CHAT_SYNC_STORAGE_PREFIX}${conversationKey}`;
+}
+
+async function getConversationSyncState(conversationKey) {
+  if (!conversationKey) {
+    return null;
+  }
+
+  const storageKey = getConversationStorageKey(conversationKey);
+  const storedValue = await chrome.storage.local.get(storageKey);
+  return storedValue?.[storageKey] || null;
+}
+
+async function setConversationSyncState(conversationKey, syncState) {
+  if (!conversationKey) {
+    return;
+  }
+
+  const storageKey = getConversationStorageKey(conversationKey);
+  await chrome.storage.local.set({
+    [storageKey]: syncState
+  });
+}
+
+function filterUploadedFilesByMessages(uploadedFiles, messages) {
+  const allowedMessageIds = new Set((messages || []).map((message) => message.id));
+
+  return (uploadedFiles || []).filter((file) =>
+    (file?.attachedInMessages || []).some((item) => allowedMessageIds.has(item?.messageId))
+  );
+}
+
+function buildIncrementalChatPayload(payload, syncState, conversationKey) {
+  const allMessages = Array.isArray(payload?.messages) ? payload.messages : [];
+  const lastSyncedMessageId = syncState?.lastMessageId || null;
+  const matchedIndex = lastSyncedMessageId
+    ? allMessages.findIndex((message) => message.id === lastSyncedMessageId)
+    : -1;
+  const startIndex = matchedIndex >= 0 ? matchedIndex + 1 : 0;
+  const newMessages = allMessages.slice(startIndex);
+  const uploadedFiles = filterUploadedFilesByMessages(payload?.uploadedFiles, newMessages);
+  const userMessageCount = newMessages.filter((message) => message.role === "user").length;
+  const assistantMessageCount = newMessages.filter((message) => message.role === "assistant").length;
+  const totalSourceCount = newMessages.reduce(
+    (count, message) => count + (message?.sourceCount || 0),
+    0
+  );
+  const totalWebSourceCount = newMessages.reduce(
+    (count, message) =>
+      count + (message?.sources || []).filter((source) => source.type === "web").length,
+    0
+  );
+  const totalUploadReferenceCount = newMessages.reduce(
+    (count, message) =>
+      count + (message?.sources || []).filter((source) => source.type === "upload").length,
+    0
+  );
+  const lastMessage = allMessages[allMessages.length - 1] || null;
+
+  return {
+    payload: {
+      ...payload,
+      summary: {
+        ...payload.summary,
+        messageCount: newMessages.length,
+        userMessageCount,
+        assistantMessageCount,
+        uploadCount: uploadedFiles.length,
+        totalSourceCount,
+        totalWebSourceCount,
+        totalUploadReferenceCount,
+        fullMessageCount: allMessages.length
+      },
+      uploadedFiles,
+      messages: newMessages,
+      incrementalSync: {
+        enabled: true,
+        conversationKey,
+        lastSyncedMessageId,
+        fullMessageCount: allMessages.length,
+        newMessageCount: newMessages.length,
+        startIndex
+      }
+    },
+    nextSyncState: lastMessage
+      ? {
+          lastMessageId: lastMessage.id,
+          lastMessageIndex: lastMessage.index,
+          syncedAt: new Date().toISOString()
+        }
+      : syncState
+  };
 }
 
 // Checks whether the active tab points at a supported ChatGPT page.
@@ -187,10 +287,30 @@ async function extractConversationFromTab(tabId) {
 
 // Sends the extracted payload to the optional backend for scoring or analysis.
 async function sendChatPayloadToBackend(payload) {
-  if (!BACKEND_CHAT_URL) {
+  const conversationKey = getConversationSyncKey(payload);
+  const syncState = await getConversationSyncState(conversationKey);
+  const preparedPayload = buildIncrementalChatPayload(payload, syncState, conversationKey);
+
+  console.log("[ChatGPT Extractor] Prepared chat payload to send:", preparedPayload.payload);
+
+  if (!preparedPayload.payload.messages.length) {
     return {
       attempted: false,
-      reason: "BACKEND_CHAT_URL is not configured."
+      reason: "No new messages were found for this conversation.",
+      sync: preparedPayload.payload.incrementalSync,
+      preparedPayload: preparedPayload.payload
+    };
+  }
+
+  if (!BACKEND_CHAT_URL) {
+    await setConversationSyncState(conversationKey, preparedPayload.nextSyncState);
+
+    return {
+      attempted: false,
+      reason: "BACKEND_CHAT_URL is not configured.",
+      sync: preparedPayload.payload.incrementalSync,
+      preparedPayload: preparedPayload.payload,
+      advancedWithoutBackend: true
     };
   }
 
@@ -200,7 +320,7 @@ async function sendChatPayloadToBackend(payload) {
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(preparedPayload.payload)
     });
 
     let responseBody = null;
@@ -210,18 +330,26 @@ async function sendChatPayloadToBackend(payload) {
       responseBody = null;
     }
 
+    if (response.ok) {
+      await setConversationSyncState(conversationKey, preparedPayload.nextSyncState);
+    }
+
     return {
       attempted: true,
       ok: response.ok,
       status: response.status,
-      response: responseBody
+      response: responseBody,
+      sync: preparedPayload.payload.incrementalSync,
+      preparedPayload: preparedPayload.payload
     };
   } catch (error) {
     return {
       attempted: true,
       ok: false,
       status: "network_error",
-      error: String(error)
+      error: String(error),
+      sync: preparedPayload.payload.incrementalSync,
+      preparedPayload: preparedPayload.payload
     };
   }
 }
@@ -257,6 +385,18 @@ async function applyHighlightsInTab(tabId, highlightItems) {
   return result;
 }
 
+// Mirrors a debug payload into the ChatGPT tab console for easier inspection.
+async function logDebugPayloadInTab(tabId, label, payload) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    func: (logLabel, logPayload) => {
+      console.log(logLabel, logPayload);
+    },
+    args: [label, payload]
+  });
+}
+
 // Runs the full extract -> backend -> normalize -> highlight pipeline on click.
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab?.id) {
@@ -272,6 +412,11 @@ chrome.action.onClicked.addListener(async (tab) => {
   try {
     const extractedConversation = await extractConversationFromTab(tab.id);
     const backendResult = await sendChatPayloadToBackend(extractedConversation);
+    await logDebugPayloadInTab(
+      tab.id,
+      "[ChatGPT Extractor][Page] Prepared chat payload to send:",
+      backendResult?.preparedPayload || null
+    );
     const highlightPayload = HighlightNormalizer.buildHighlightPayloadFromBackend(
       backendResult,
       extractedConversation
