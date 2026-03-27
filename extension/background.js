@@ -1,16 +1,152 @@
 importScripts("highlight-normalizer.js");
 
 const BACKEND_CHAT_URL = "";
+const BACKEND_ATTACHMENT_URL = "http://127.0.0.1:5051/upload";
+const EXTENSION_BUILD_TAG = "attachment-background-v2";
 
 const CHATGPT_URL_PREFIXES = [
   "https://chatgpt.com/",
   "https://chat.openai.com/"
 ];
 
+console.log("[ChatGPT Extractor] Background service worker booted:", {
+  build: EXTENSION_BUILD_TAG,
+  uploadUrl: BACKEND_ATTACHMENT_URL
+});
+
+function base64ToUint8Array(base64Value) {
+  const binary = atob(base64Value || "");
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
 // Checks whether the active tab points at a supported ChatGPT page.
 function isChatGptConversationUrl(url) {
   return CHATGPT_URL_PREFIXES.some((prefix) => (url || "").startsWith(prefix));
 }
+
+// Uploads a captured ChatGPT attachment from the extension service worker.
+async function uploadAttachmentToBackend(uploadRequest) {
+  if (!BACKEND_ATTACHMENT_URL) {
+    return {
+      attempted: false,
+      reason: "BACKEND_ATTACHMENT_URL is not configured."
+    };
+  }
+
+  const metadata = uploadRequest?.metadata || {};
+  const conversation = metadata.conversation || {};
+  const fileData = uploadRequest?.fileData || {};
+
+  if (!fileData.base64) {
+    return {
+      attempted: true,
+      ok: false,
+      status: "missing_file_data",
+      error: "No serialized file data was provided."
+    };
+  }
+
+  try {
+    const fileBytes = base64ToUint8Array(fileData.base64);
+    const fileBlob = new Blob([fileBytes], {
+      type: fileData.type || "application/octet-stream"
+    });
+    const formData = new FormData();
+
+    formData.append("file", fileBlob, fileData.name || "upload.bin");
+    formData.append("platform", conversation.platform || "chatgpt");
+    formData.append("capture_source", metadata.source || "unknown");
+
+    if (conversation.id) {
+      formData.append("external_conversation_id", conversation.id);
+    }
+
+    if (conversation.url) {
+      formData.append("conversation_url", conversation.url);
+    }
+
+    if (conversation.title) {
+      formData.append("conversation_title", conversation.title);
+    }
+
+    const response = await fetch(BACKEND_ATTACHMENT_URL, {
+      method: "POST",
+      body: formData
+    });
+
+    let responseBody = null;
+    try {
+      responseBody = await response.json();
+    } catch {
+      responseBody = null;
+    }
+
+    return {
+      attempted: true,
+      ok: response.ok,
+      status: response.status,
+      response: responseBody
+    };
+  } catch (error) {
+    return {
+      attempted: true,
+      ok: false,
+      status: "network_error",
+      error: String(error)
+    };
+  }
+}
+
+// Handles background-side messages from persistent ChatGPT observers.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "chatgpt_background_ping") {
+    sendResponse({
+      ok: true,
+      build: EXTENSION_BUILD_TAG,
+      uploadUrl: BACKEND_ATTACHMENT_URL
+    });
+    return false;
+  }
+
+  if (message?.type === "chatgpt_get_attachment_upload_config") {
+    sendResponse({
+      backendAttachmentUrl: BACKEND_ATTACHMENT_URL
+    });
+    return false;
+  }
+
+  if (message?.type === "chatgpt_attachment_captured") {
+    console.log("[ChatGPT Extractor] Attachment capture event:", {
+      tabId: sender.tab?.id || null,
+      url: sender.tab?.url || null,
+      payload: message.payload || null
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === "chatgpt_upload_attachment") {
+    void (async () => {
+      const result = await uploadAttachmentToBackend(message.payload);
+      console.log("[ChatGPT Extractor] Background upload result:", {
+        tabId: sender.tab?.id || null,
+        url: sender.tab?.url || null,
+        result
+      });
+      sendResponse(result);
+    })();
+
+    return true;
+  }
+
+  return false;
+});
 
 // Injects the page extractor and returns the structured conversation payload.
 async function extractConversationFromTab(tabId) {

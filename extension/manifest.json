@@ -6,7 +6,19 @@
   "permissions": ["activeTab", "scripting"],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
+    "https://chat.openai.com/*",
+    "http://127.0.0.1:5051/*",
+    "http://localhost:5051/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["chatgpt-attachment-observer.js"],
+      "run_at": "document_idle"
+    }
   ],
   "action": {
     "default_title": "Detect AI hallucinations"
