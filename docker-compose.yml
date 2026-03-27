@@ -1,38 +1,54 @@
 version: "3.8"
 
 services:
-  # ── PostgreSQL (with pgvector + Apache AGE) ─────────────────────────
+  # ── PostgreSQL (with pgvector) ──────────────────────────────────────
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: hallucination-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: hallucination_db
+      POSTGRES_DB: db
     ports:
       - "5433:5432"
     volumes:
-      - hallucination_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── Redis ───────────────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    container_name: hallucination-redis
+
+  # ── Backend (FastAPI + CUDA) ────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
     ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      # Override DB/Redis URLs to use Docker service names
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/db"
+      DATABASE_URL_SYNC: "postgresql://postgres:postgres@postgres:5432/db"
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 volumes:
-  hallucination_postgres_data:
-  redis_data:
+  postgres_data:

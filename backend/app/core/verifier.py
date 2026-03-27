@@ -172,20 +172,37 @@ class ClaimVerifier:
         check_conv: bool,
         check_docs: bool,
     ) -> tuple[list[EvidencePiece], list[SourceType]]:
-        """Gather evidence from all applicable sources for a single claim."""
+        """
+        Gather evidence from applicable sources for a single claim.
+
+        Source selection is LLM-driven: the claim extractor suggests which
+        sources to check per claim via `suggested_sources`. The config
+        booleans (check_web, etc.) are opt-out overrides only — they can
+        disable a source but never force-enable one the LLM didn't suggest.
+
+        Special rules:
+        - Documents: always checked when document_ids are provided
+        - Conversation: always checked when history + NER entities exist
+        - Web: checked when LLM suggests it AND Tavily client is available
+        """
         tasks = []
         source_keys = []
         sources_checked = []
 
-        # Conversation history check
-        if check_conv and conversation_history and ner_result:
+        # Conversation history — always check if context exists (user hasn't disabled)
+        should_check_conv = (
+            check_conv is not False
+            and conversation_history
+            and ner_result
+        )
+        if should_check_conv:
             tasks.append(self._check_conversation(claim, conversation_history, ner_result))
             source_keys.append(SourceType.CONVERSATION_HISTORY)
             sources_checked.append(SourceType.CONVERSATION_HISTORY)
 
-        # Web search check
+        # Web search — LLM must suggest it, user hasn't disabled, API available
         should_check_web = (
-            check_web
+            check_web is not False
             and self.web_searcher.client
             and SourceType.WEB_SEARCH in claim.suggested_sources
         )
@@ -198,8 +215,12 @@ class ClaimVerifier:
             source_keys.append(SourceType.WEB_SEARCH)
             sources_checked.append(SourceType.WEB_SEARCH)
 
-        # Vector DB check
-        if check_docs and document_ids and SourceType.VECTOR_DB in claim.suggested_sources:
+        # Documents — always check if docs exist (user hasn't disabled)
+        should_check_docs = (
+            check_docs is not False
+            and document_ids
+        )
+        if should_check_docs:
             tasks.append(self._check_vector_db(claim, document_ids))
             source_keys.append(SourceType.VECTOR_DB)
             sources_checked.append(SourceType.VECTOR_DB)
