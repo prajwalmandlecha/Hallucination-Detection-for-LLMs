@@ -171,9 +171,53 @@
 		document.body.setAttribute(ROOT_ATTR, "bound");
 	}
 
-	// Returns assistant message containers in DOM order.
+	// Returns assistant message containers in DOM order, supporting ChatGPT, Gemini, Claude, DeepSeek, and Copilot.
 	function getAssistantMessageNodes() {
-		return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+		const selectors = [
+			// ChatGPT
+			'[data-message-author-role="assistant"]',
+			// Claude
+			'[data-testid="assistant-message"]',
+			// Gemini custom elements
+			"model-response",
+			"response-container",
+			"[class*='model-response']",
+			"[class*='response-container']",
+			// DeepSeek
+			".ds-markdown",
+			"[class*='ds-markdown']",
+			// Copilot Web Components
+			'cib-message-group[source="bot"]',
+			'cib-message-group[source="assistant"]',
+			"[class*='bot-message']",
+			"[class*='ai-message']"
+		];
+
+		const seen = new WeakSet();
+		const nodes = [];
+
+		for (const selector of selectors) {
+			try {
+				for (const el of document.querySelectorAll(selector)) {
+					if (!seen.has(el)) {
+						seen.add(el);
+						nodes.push(el);
+					}
+				}
+			} catch {
+				// ignore invalid selectors
+			}
+		}
+
+		// Sort into DOM order so highlights are applied sequentially.
+		nodes.sort((a, b) => {
+			const pos = a.compareDocumentPosition(b);
+			if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+			if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+			return 0;
+		});
+
+		return nodes;
 	}
 
 	// Narrows matching to a specific assistant message when metadata provides one.

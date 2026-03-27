@@ -1,12 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT User Chat Extractor",
-  "version": "0.1.0",
-  "description": "Detect AI hallucinations in a single click.",
-  "permissions": ["activeTab", "scripting"],
+  "name": "AI Chat Extractor",
+  "version": "0.3.0",
+  "description": "Detect AI hallucinations in a single click. Supports ChatGPT, Gemini, Claude, DeepSeek, and Copilot.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
+    "https://gemini.google.com/*",
+    "https://claude.ai/*",
+    "https://chat.deepseek.com/*",
+    "https://copilot.microsoft.com/*",
+    "https://www.bing.com/*",
     "http://127.0.0.1:5051/*",
     "http://localhost:5051/*"
   ],
@@ -16,7 +25,46 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["chatgpt-attachment-observer.js"],
+      "js": [
+        "chatgpt-attachment-observer.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "gemini-attachment-observer.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://claude.ai/*"
+      ],
+      "js": [
+        "claude-attachment-observer.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chat.deepseek.com/*"
+      ],
+      "js": [
+        "deepseek-attachment-observer.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://copilot.microsoft.com/*",
+        "https://www.bing.com/chat*"
+      ],
+      "js": [
+        "copilot-attachment-observer.js"
+      ],
       "run_at": "document_idle"
     }
   ],
