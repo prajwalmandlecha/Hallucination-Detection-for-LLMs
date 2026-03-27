@@ -37,6 +37,7 @@ function makeWelcome(paneId: string): MessageProps {
 export function ChatContainer({ activeChatId }: ChatContainerProps) {
   const [panes, setPanes] = useState<ChatPaneData[]>([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [isModelSelectionLocked, setIsModelSelectionLocked] = useState(false);
   const [models, setModels] = useState<BackendModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,36 +48,37 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
       .then((data) => {
         const available = data.filter((m) => m.available);
         setModels(available);
-        // Init first pane with first available model
-        const firstModel = available[0]?.id ?? "llama-3.3-70b-versatile";
-        setPanes([{ id: "pane-root", modelId: firstModel, messages: [makeWelcome("pane-root")] }]);
       })
       .catch((e) => {
         console.error("Failed to load models:", e);
         setError("Backend unreachable — is the server running on :8000 ?");
-        // Fallback pane so UI doesn't break
-        setPanes([{ id: "pane-root", modelId: "llama-3.3-70b-versatile", messages: [makeWelcome("pane-root")] }]);
       })
       .finally(() => setModelsLoading(false));
   }, []);
 
   // ── Reset panes on new session ──────────────────────────────────────────
   useEffect(() => {
-    if (models.length === 0) return;
     const firstModel = models[0]?.id ?? "llama-3.3-70b-versatile";
     const paneId = `pane-root-${Date.now()}`;
     setPanes([{ id: paneId, modelId: firstModel, messages: [makeWelcome(paneId)] }]);
+    setIsModelSelectionLocked(false);
     setIsThinking(false);
     setError(null);
-  }, [activeChatId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeChatId, models]);
 
-  // ── Add comparison pane ─────────────────────────────────────────────────
   const handleAddPane = () => {
-    if (panes.length >= 3) return;
+    if (isModelSelectionLocked || panes.length >= 3) {
+      return;
+    }
+
     const newPaneId = `pane-${Date.now()}`;
-    // Pick second available model different from pane[0]
-    const usedModels = new Set(panes.map((p) => p.modelId));
-    const nextModel = models.find((m) => !usedModels.has(m.id))?.id ?? models[1]?.id ?? panes[0].modelId;
+    const usedModels = new Set(panes.map((pane) => pane.modelId));
+    const nextModel =
+      models.find((model) => !usedModels.has(model.id))?.id ||
+      models[1]?.id ||
+      panes[0]?.modelId ||
+      "llama-3.3-70b-versatile";
+
     setPanes((prev) => [
       ...prev,
       { id: newPaneId, modelId: nextModel, messages: [makeWelcome(newPaneId)] },
@@ -93,6 +95,8 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
 
   // ── Send message → chat → detect ────────────────────────────────────────
   const handleSendMessage = async (content: string) => {
+    setIsModelSelectionLocked(true);
+
     const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     setError(null);
 
@@ -136,8 +140,16 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
             .map((claim) => ({
               text: claim.text,
               risk: scoreToRisk(claim.risk_score),
+              score: claim.risk_score,
+              status: claim.status,
+              claimType: claim.type,
+              claimId: claim.id,
+              citations: (claim.verification_details?.evidence || [])
+                .map((evidence) => evidence.source_title || evidence.source_url || evidence.source_type)
+                .filter(Boolean)
+                .slice(0, 4),
               explanation: claim.verification_details.evidence[0]?.snippet
-                ?? `Status: ${claim.status} | Score: ${claim.risk_score.toFixed(0)}/100`,
+                ?? "Backend did not return evidence snippet for this claim yet.",
             }));
         } catch (detErr) {
           console.warn("Detection failed (non-fatal):", detErr);
@@ -202,6 +214,7 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
         onAddPane={handleAddPane}
         onChangeModel={handleChangeModel}
         onRemovePane={handleRemovePane}
+        canAddPane={!isModelSelectionLocked}
         models={models}
       />
     </>

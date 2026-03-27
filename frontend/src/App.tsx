@@ -46,7 +46,7 @@ function App() {
         onChatSelect={setActiveChatId}
       />
       <SidebarInset className="relative flex-1 flex flex-col z-10 bg-transparent shadow-none border-none ring-0">
-        <ChatContainer activeChatId={activeChatId} />
+        <ChatContainer key={activeChatId} activeChatId={activeChatId} />
       </SidebarInset>
     </SidebarProvider>
     </ThemeProvider>

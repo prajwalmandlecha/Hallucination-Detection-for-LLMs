@@ -1,16 +1,9 @@
-import React from "react";
 import { ChatInput } from "./chat-input";
 import { ChatMessageList } from "./chat-message-list";
 import type { ChatPaneData, ModelId } from "./chat-container";
 import type { BackendModel } from "@/lib/api";
-import { Plus, X, ArrowRightLeft, ChevronRight } from "lucide-react";
+import { Plus, X, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { ModeToggle } from "@/components/mode-toggle";
 
 import {
@@ -29,6 +22,7 @@ interface ChatLayoutProps {
   onAddPane: () => void;
   onChangeModel: (paneId: string, newModelId: ModelId) => void;
   onRemovePane: (paneId: string) => void;
+  canAddPane?: boolean;
   chatTitle?: string;
   models?: BackendModel[];
 }
@@ -40,6 +34,7 @@ export function ChatLayout({
   onAddPane,
   onChangeModel,
   onRemovePane,
+  canAddPane = true,
   chatTitle = "Current Session",
   models = [],
 }: ChatLayoutProps) {
@@ -65,11 +60,11 @@ export function ChatLayout({
 
       {/* Dynamic Pane Flexbox Layout */}
       <div className="flex-1 flex gap-4 overflow-hidden min-h-0 w-full z-10">
-        {panes.map((pane, index) => (
-          <React.Fragment key={pane.id}>
-            <div
-              className="flex-1 flex flex-col relative h-full bg-pane rounded-2xl border border-subtle shadow-[0_8px_30px_rgba(0,0,0,0.5)] overflow-hidden min-h-0 transition-all duration-300"
-            >
+        {panes.map((pane) => (
+          <div
+            key={pane.id}
+            className="flex-1 flex flex-col relative h-full bg-pane rounded-2xl border border-subtle shadow-[0_2px_12px_rgba(120,90,60,0.14)] dark:shadow-[0_8px_30px_rgba(0,0,0,0.5)] overflow-hidden min-h-0 transition-all duration-300"
+          >
             {/* Aceternity Dot Background */}
             <div
               className="absolute inset-0 z-0 pointer-events-none"
@@ -126,29 +121,9 @@ export function ChatLayout({
               <ChatMessageList messages={pane.messages} compactMode={isCompact} />
             </div>
           </div>
-
-            {/* Compare Button Between Panes */}
-            {index < panes.length - 1 && (
-              <div className="relative z-20 flex items-center justify-center w-0 h-full">
-                <TooltipProvider delay={0}>
-                  <Tooltip>
-                    <TooltipTrigger
-                      className="absolute z-30 inline-flex items-center justify-center h-8 w-8 rounded-full bg-hover border border-strong shadow-[0_0_15px_rgba(0,0,0,0.5)] text-sec hover:text-pri hover:bg-msg-user transition-all hover:scale-110 focus-visible:outline-none focus-visible:ring-1"
-                    >
-                      <ArrowRightLeft className="h-3.5 w-3.5" />
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="bg-tooltip text-pri border-strong text-xs shadow-lg">
-                      <p>Compare Outputs</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              </div>
-            )}
-          </React.Fragment>
         ))}
 
-        {/* Add Model Column Button */}
-        {panes.length < 3 && (
+        {canAddPane && panes.length < 3 && (
           <div className="h-full flex-shrink-0 w-12 sm:w-16 flex items-center justify-center">
             <Button
               variant="outline"

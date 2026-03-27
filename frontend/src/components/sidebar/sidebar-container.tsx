@@ -46,9 +46,9 @@ export function ChatSidebarContainer({ activeChatId, onChatSelect }: ChatSidebar
 
   const handleNewChat = () => {
     const newId = `chat-${Date.now()}`;
-    setChats([
+    setChats((prev) => [
       { id: newId, title: "New Session", snippet: "", riskLevel: "none" },
-      ...chats,
+      ...prev,
     ]);
     onChatSelect(newId);
   };

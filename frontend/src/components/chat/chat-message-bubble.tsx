@@ -19,6 +19,11 @@ export interface HallucinationSpan {
   text: string;
   risk: RiskLevel;
   explanation?: string;
+  score?: number;
+  status?: "VERIFIED" | "UNVERIFIED" | "CONTRADICTED" | "SKIPPED";
+  claimType?: string;
+  claimId?: string;
+  citations?: string[];
 }
 
 export interface MessageProps {
@@ -40,6 +45,13 @@ const riskToBadgeColors = {
 
 export function ChatMessageBubble({ role, content, spans, timestamp, compactMode }: MessageProps) {
   const isUser = role === "user";
+
+  const formatScore = (score?: number) => (typeof score === "number" ? `${score.toFixed(1)}/100` : "N/A");
+
+  const formatCitations = (citations?: string[]) =>
+    citations && citations.length > 0
+      ? citations.join(" | ")
+      : "No citations returned by backend for this claim yet.";
 
   // A very simple regex replacer if spans are provided to highlight text.
   // In a real app, this would be an exact token mapper. For now, it highlights if text matches.
@@ -79,9 +91,23 @@ export function ChatMessageBubble({ role, content, spans, timestamp, compactMode
             {spans && spans.some((s) => s.risk !== "none") && (
               <div className="flex gap-1.5 flex-wrap">
                 {spans.filter((s) => s.risk !== "none").map((badSpan, idx) => (
-                  <Badge key={idx} variant="outline" className={cn("text-[10px] uppercase font-medium tracking-wide border shadow-sm px-1.5 py-0 h-4", riskToBadgeColors[badSpan.risk])}>
-                     {badSpan.risk === "red" ? "High Risk" : badSpan.risk === "amber" ? "Elevated Risk" : "Verified"}
-                  </Badge>
+                  <TooltipProvider key={idx} delay={0}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge variant="outline" className={cn("cursor-help text-[10px] uppercase font-medium tracking-wide border shadow-sm px-1.5 py-0 h-4", riskToBadgeColors[badSpan.risk])}>
+                          {badSpan.risk === "red" ? "High Risk" : badSpan.risk === "amber" ? "Elevated Risk" : "Verified"}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="bg-tooltip text-pri border-strong text-xs shadow-lg max-w-[320px]">
+                        <div className="space-y-1">
+                          <p><strong>Score:</strong> {formatScore(badSpan.score)}</p>
+                          <p><strong>Status:</strong> {badSpan.status || "N/A"}</p>
+                          <p><strong>Type:</strong> {badSpan.claimType || "N/A"}</p>
+                          <p><strong>Citations:</strong> {formatCitations(badSpan.citations)}</p>
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 ))}
               </div>
             )}
@@ -120,6 +146,13 @@ export function ChatMessageBubble({ role, content, spans, timestamp, compactMode
                           <span className="truncate max-w-[200px] text-pri">"{span.text}"</span>
                         </div>
                         <p className="text-xs text-sec mt-1">{span.explanation || "No advanced explanation available."}</p>
+                        <div className="text-[11px] text-sec/90 space-y-1 mt-2">
+                          <p><strong>Score:</strong> {formatScore(span.score)}</p>
+                          <p><strong>Status:</strong> {span.status || "N/A"}</p>
+                          <p><strong>Type:</strong> {span.claimType || "N/A"}</p>
+                          <p><strong>Claim ID:</strong> {span.claimId || "N/A"}</p>
+                          <p><strong>Citations:</strong> {formatCitations(span.citations)}</p>
+                        </div>
                       </div>
                     ))
                   ) : (
