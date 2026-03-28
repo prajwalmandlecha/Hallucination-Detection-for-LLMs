@@ -11,8 +11,11 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Streamdown } from "streamdown";
 import "streamdown/styles.css";
+import { useEffect, useRef, useState } from "react";
+import Mark from "mark.js";
 export type RiskLevel = "none" | "green" | "amber" | "red";
 
 export interface HallucinationSpan {
@@ -45,6 +48,90 @@ const riskToBadgeColors = {
 
 export function ChatMessageBubble({ role, content, spans, timestamp, compactMode }: MessageProps) {
   const isUser = role === "user";
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [hoveredSpanIndex, setHoveredSpanIndex] = useState<number | null>(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+  const [isTooltipOpen, setIsTooltipOpen] = useState(false);
+
+  useEffect(() => {
+    if (!contentRef.current || !spans || spans.length === 0 || isUser) return;
+    const ctx = contentRef.current;
+    
+    const instance = new Mark(ctx);
+    instance.unmark({
+      done: () => {
+        const sortedSpans = spans
+          .map((s, idx) => ({ ...s, originalIndex: idx }))
+          .filter(s => s.risk !== "none")
+          .sort((a, b) => b.text.length - a.text.length);
+
+        sortedSpans.forEach(span => {
+          instance.mark(span.text, {
+            separateWordSearch: false,
+            acrossElements: true,
+            diacritics: false,
+            accuracy: "partially", // allows matching despite minor punctuation differences
+            className: cn(
+              "cursor-help bg-transparent rounded-[2px] transition-all hover:opacity-80 px-1 inline pb-0.5",
+              span.risk === "red"
+                ? "bg-red-500/30 text-red-700 dark:bg-red-500/40 dark:text-red-300 border-b border-red-500"
+                : span.risk === "amber"
+                ? "bg-amber-500/30 text-amber-700 dark:bg-amber-500/40 dark:text-amber-300 border-b border-amber-500"
+                : "bg-green-500/30 text-green-700 dark:bg-green-500/40 dark:text-green-300 border-b border-green-500"
+            ),
+            each: (elem) => {
+              (elem as HTMLElement).dataset.spanIndex = span.originalIndex.toString();
+            }
+          });
+        });
+      }
+    });
+
+    return () => instance.unmark();
+  }, [content, spans, isUser]);
+
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!contentRef.current) return;
+    const ctx = contentRef.current;
+
+    const handleMouseOver = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName.toLowerCase() === "mark" && target.dataset.spanIndex !== undefined) {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        setHoveredSpanIndex(parseInt(target.dataset.spanIndex, 10));
+        setTooltipPos({ x: e.clientX, y: e.clientY });
+        setIsTooltipOpen(true);
+      }
+    };
+
+    const handleMouseOut = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // Use relatedTarget to prevent flickering when moving inside the mark
+      const related = e.relatedTarget as HTMLElement;
+      if (target.tagName.toLowerCase() === "mark" && (!related || related.tagName.toLowerCase() !== "mark")) {
+        timeoutRef.current = setTimeout(() => setIsTooltipOpen(false), 200);
+      }
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName.toLowerCase() === "mark") {
+        setTooltipPos({ x: e.clientX, y: e.clientY });
+      }
+    };
+
+    ctx.addEventListener("mouseover", handleMouseOver);
+    ctx.addEventListener("mouseout", handleMouseOut);
+    ctx.addEventListener("mousemove", handleMouseMove);
+
+    return () => {
+      ctx.removeEventListener("mouseover", handleMouseOver);
+      ctx.removeEventListener("mouseout", handleMouseOut);
+      ctx.removeEventListener("mousemove", handleMouseMove);
+    };
+  }, []);
 
   const formatScore = (score?: number) => (typeof score === "number" ? `${score.toFixed(1)}/100` : "N/A");
 
@@ -53,16 +140,16 @@ export function ChatMessageBubble({ role, content, spans, timestamp, compactMode
       ? citations.join(" | ")
       : "No citations returned by backend for this claim yet.";
 
-  // A very simple regex replacer if spans are provided to highlight text.
-  // In a real app, this would be an exact token mapper. For now, it highlights if text matches.
   const renderContent = () => {
     if (isUser) return content;
     return (
-      <div className="prose dark:prose-invert prose-sm max-w-none break-words prose-p:leading-relaxed prose-pre:p-0">
+      <div ref={contentRef} className="prose dark:prose-invert prose-sm max-w-none break-words prose-p:leading-relaxed prose-pre:p-0 relative">
         <Streamdown>{content}</Streamdown>
       </div>
     );
   };
+
+  const hoveredSpan = hoveredSpanIndex !== null && spans ? spans[hoveredSpanIndex] : null;
 
   return (
     <div className={cn("flex w-full gap-3 transition-opacity", compactMode ? "mt-4" : "mt-6", isUser ? "justify-end" : "justify-start")}>
@@ -84,6 +171,73 @@ export function ChatMessageBubble({ role, content, spans, timestamp, compactMode
         >
           {renderContent()}
         </div>
+
+        {/* Floating Tooltip via HoverCard */
+        hoveredSpan && (
+          <HoverCard open={isTooltipOpen} defaultOpen={false}>
+            <HoverCardTrigger render={<div 
+                style={{ 
+                  position: 'fixed', 
+                  left: tooltipPos.x, 
+                  top: tooltipPos.y, 
+                  width: 1, 
+                  height: 1,
+                  pointerEvents: 'none',
+                  zIndex: 9999
+                }} 
+              />} 
+            />
+            <HoverCardContent
+              side="top"
+              align="start"
+              sideOffset={16}
+              className="w-[300px] sm:w-[360px] bg-pane/95 backdrop-blur-md border-strong shadow-2xl p-4 flex flex-col gap-2 rounded-xl z-50 text-sans font-sans"
+              onMouseEnter={() => {
+                if (timeoutRef.current) clearTimeout(timeoutRef.current);
+                setIsTooltipOpen(true);
+              }}
+              onMouseLeave={() => {
+                timeoutRef.current = setTimeout(() => setIsTooltipOpen(false), 200);
+              }}
+            >
+              <div className="flex items-center justify-between pointer-events-none">
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "text-[10px] uppercase font-bold tracking-wider",
+                    riskToBadgeColors[hoveredSpan.risk]
+                  )}
+                >
+                  {hoveredSpan.risk === "red"
+                    ? "High Risk"
+                    : hoveredSpan.risk === "amber"
+                    ? "Unverified"
+                    : "Verified"}
+                </Badge>
+                <span className="text-[11px] font-mono text-mut">
+                  Score: {formatScore(hoveredSpan.score)}
+                </span>
+              </div>
+              <p className="text-sm font-medium text-pri leading-snug break-words">
+                "{hoveredSpan.text}"
+              </p>
+              {hoveredSpan.explanation && (
+                <div className="text-xs text-sec bg-app/50 p-2.5 rounded-md border border-subtle mt-1 flex flex-col gap-1.5 break-words">
+                  <span className="text-[10px] uppercase font-bold text-mut tracking-wider">
+                    Explanation
+                  </span>
+                  {hoveredSpan.explanation}
+                </div>
+              )}
+              <div className="text-xs mt-1 text-mut bg-app/30 p-2.5 rounded-md border border-subtle flex flex-col gap-1 break-words">
+                <span className="text-[10px] uppercase font-bold text-mut tracking-wider">
+                  Sources
+                </span>
+                {formatCitations(hoveredSpan.citations)}
+              </div>
+            </HoverCardContent>
+          </HoverCard>
+        )}
 
         {/* AI Actions Row */
         !isUser && (

@@ -56,6 +56,7 @@ Return ONLY valid JSON with this exact structure:
     {
       "id": "c1",
       "text": "The exact factual claim as a standalone assertion",
+      "quote_from_response": "A strictly continuous 5-10 word exact substring from the AI Response that anchors this claim. MUST NOT contain markdown formatting like **.",
       "type": "factual",
       "importance": 0.8,
       "suggested_sources": ["web_search"],
@@ -74,9 +75,9 @@ If the response contains no verifiable factual claims, return: {"claims": []}
 
 EXTRACTION_PROVIDERS = [
     {
-        "name": "groq",
+        "name": "groq_disabled",
         "base_url": "https://api.groq.com/openai/v1",
-        "api_key_field": "groq_api_key",
+        "api_key_field": "bad_groq_key",
         "model": "llama-3.3-70b-versatile",
         "description": "Groq Llama 3.3 70B — fastest free option (~500 tok/s)",
     },
@@ -252,6 +253,7 @@ class ClaimExtractor:
                     claim = ExtractedClaim(
                         id=item.get("id", f"c{i + 1}"),
                         text=item.get("text", ""),
+                        quote_from_response=item.get("quote_from_response", None),
                         type=self._parse_claim_type(item.get("type", "factual")),
                         importance=float(item.get("importance", 0.5)),
                         suggested_sources=self._parse_sources(item.get("suggested_sources", [])),

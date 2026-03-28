@@ -18,6 +18,7 @@ export interface ChatMessage {
 export interface DetectionClaim {
   id: string;
   text: string;
+  quote_from_response?: string;
   type: string;
   risk_score: number;
   status: "VERIFIED" | "UNVERIFIED" | "CONTRADICTED" | "SKIPPED";

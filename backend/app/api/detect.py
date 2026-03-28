@@ -122,6 +122,7 @@ async def detect_hallucinations(request: DetectionRequest):
             claims_response.append(ClaimResultResponse(
                 id=result.claim.id,
                 text=result.claim.text,
+                quote_from_response=result.claim.quote_from_response,
                 type=result.claim.type,
                 risk_score=result.risk_score,
                 status=result.status,

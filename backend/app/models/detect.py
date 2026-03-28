@@ -88,6 +88,7 @@ class ExtractedClaim(BaseModel):
     """A single claim extracted from the AI response by the LLM."""
     id: str = Field(..., description="Unique claim identifier (e.g., c1, c2)")
     text: str = Field(..., description="The claim as a standalone assertion")
+    quote_from_response: Optional[str] = Field(None, description="The exact word-for-word substring from the original AI response")
     type: ClaimType = Field(ClaimType.FACTUAL, description="Claim type classification")
     importance: float = Field(0.5, ge=0, le=1, description="How critical this claim is (0-1)")
     suggested_sources: list[SourceType] = Field(
@@ -152,6 +153,7 @@ class ClaimResultResponse(BaseModel):
     """Claim-level result in the API response."""
     id: str
     text: str
+    quote_from_response: Optional[str] = None
     type: ClaimType
     risk_score: float = Field(ge=0, le=100)
     status: ClaimStatus

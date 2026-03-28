@@ -177,7 +177,7 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
           spans = detection.claims
             .filter((c) => c.status !== "SKIPPED")
             .map((claim) => ({
-              text: claim.text,
+              text: claim.quote_from_response || claim.text,
               risk: scoreToRisk(claim.risk_score),
               score: claim.risk_score,
               status: claim.status,

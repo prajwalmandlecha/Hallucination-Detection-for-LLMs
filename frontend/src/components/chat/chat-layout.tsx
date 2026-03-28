@@ -188,7 +188,7 @@ export function ChatLayout({
 
             {/* Scrollable Message Content */}
             <div className="flex-1 overflow-hidden min-h-0 relative z-10">
-              <ChatMessageList messages={pane.messages} compactMode={isCompact} />
+              <ChatMessageList messages={pane.messages} compactMode={isCompact} isThinking={isThinking} />
             </div>
           </div>
         )))}
