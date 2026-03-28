@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI Chat Extractor",
   "version": "0.3.0",
-  "description": "Detect AI hallucinations in a single click. Supports ChatGPT, Gemini, Claude, DeepSeek, and Copilot.",
+  "description": "Detect AI hallucinations in ChatGPT, Gemini, Claude, and DeepSeek conversations with one click.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -14,8 +14,6 @@
     "https://gemini.google.com/*",
     "https://claude.ai/*",
     "https://chat.deepseek.com/*",
-    "https://copilot.microsoft.com/*",
-    "https://www.bing.com/*",
     "http://127.0.0.1:8000/*",
     "http://localhost:8000/*"
   ],
@@ -54,16 +52,6 @@
       ],
       "js": [
         "deepseek-attachment-observer.js"
-      ],
-      "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "https://copilot.microsoft.com/*",
-        "https://www.bing.com/chat*"
-      ],
-      "js": [
-        "copilot-attachment-observer.js"
       ],
       "run_at": "document_idle"
     }
