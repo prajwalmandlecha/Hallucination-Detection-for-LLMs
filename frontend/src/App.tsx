@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { ChatSidebarContainer } from "@/components/sidebar/sidebar-container";
 import { ChatContainer } from "@/components/chat/chat-container";
+import { AnalyticsPage } from "@/components/analytics/analytics-page";
 import { SidebarProvider, SidebarInset } from "@/components/animate-ui/components/radix/sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
 
 function App() {
-  const [activeChatId, setActiveChatId] = useState<string>("chat-1");
+  const [activeChatId, setActiveChatId] = useState<string>("");
 
   return (
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme" attribute="class">
@@ -46,7 +47,11 @@ function App() {
         onChatSelect={setActiveChatId}
       />
       <SidebarInset className="relative flex-1 flex flex-col z-10 bg-transparent shadow-none border-none ring-0">
-        <ChatContainer key={activeChatId} activeChatId={activeChatId} />
+        {activeChatId === "analytics" ? (
+          <AnalyticsPage />
+        ) : (
+          <ChatContainer key={activeChatId} activeChatId={activeChatId} />
+        )}
       </SidebarInset>
     </SidebarProvider>
     </ThemeProvider>
