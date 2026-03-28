@@ -74,7 +74,6 @@ class Message(Base):
     role = Column(String(50), nullable=False)  # 'user', 'assistant', 'system'
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    metadata_json = Column(JSONB, default=dict)
     
     # External platform tracking
     external_id = Column(String(255), nullable=True)       # "user-8", "assistant-8" (from extension)
