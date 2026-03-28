@@ -13,11 +13,11 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────
     database_url: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5433/db",
+        default="postgresql+asyncpg://detection_admin:detection_pass@localhost:5433/ai_detection",
         description="Async PostgreSQL connection string",
     )
     database_url_sync: str = Field(
-        default="postgresql://postgres:postgres@localhost:5433/db",
+        default="postgresql://detection_admin:detection_pass@localhost:5433/ai_detection",
         description="Sync PostgreSQL connection string (for Alembic)",
     )
 

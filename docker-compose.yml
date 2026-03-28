@@ -1,19 +1,20 @@
-version: "3.8"
+name: ai_hallucination_detection_system
 
 services:
   # ── PostgreSQL (with pgvector) ──────────────────────────────────────
   postgres:
     image: pgvector/pgvector:pg16
+    container_name: postgres
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: db
+      POSTGRES_USER: detection_admin
+      POSTGRES_PASSWORD: detection_pass
+      POSTGRES_DB: ai_detection
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U detection_admin -d ai_detection"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -24,6 +25,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    container_name: backend
     env_file:
       - ./backend/.env
     ports:
@@ -39,9 +41,9 @@ services:
               count: 1
               capabilities: [gpu]
     environment:
-      # Override DB/Redis URLs to use Docker service names
-      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/db"
-      DATABASE_URL_SYNC: "postgresql://postgres:postgres@postgres:5432/db"
+      # Override DB URLs to use Docker service names
+      DATABASE_URL: "postgresql+asyncpg://detection_admin:detection_pass@postgres:5432/ai_detection"
+      DATABASE_URL_SYNC: "postgresql://detection_admin:detection_pass@postgres:5432/ai_detection"
       OLLAMA_BASE_URL: "http://host.docker.internal:11434"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

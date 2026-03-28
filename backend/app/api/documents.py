@@ -28,10 +28,19 @@ router = APIRouter()
 async def upload_document(
     file: UploadFile = File(...),
     conversation_id: str = Form(None),
+    external_conversation_id: str = Form(None),
+    platform: str = Form(None),
+    conversation_url: str = Form(None),
+    conversation_title: str = Form(None),
+    capture_source: str = Form(None),
     db: AsyncSession = Depends(get_db_session),
 ):
     """
     Upload a document for use as a verification source.
+    
+    Supports two identification methods:
+    - `conversation_id`: Direct internal ID (frontend)
+    - `external_conversation_id` + `platform`: External platform ID (extension)
     
     The document is processed: text extracted → chunked → embedded via Ollama → stored in pgvector.
     Returns a document_id to include in /detect requests.
@@ -39,8 +48,21 @@ async def upload_document(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
+    # Resolve conversation_id from either direct ID or external ID
+    if not conversation_id and external_conversation_id and platform:
+        from app.api.conversations import find_or_create_conversation
+        conv, _ = await find_or_create_conversation(
+            db=db,
+            external_id=external_conversation_id,
+            platform=platform,
+            title=conversation_title,
+            external_url=conversation_url,
+        )
+        conversation_id = conv.id
+        logger.info(f"Resolved {platform}/{external_conversation_id} → {conversation_id}")
+
     if not conversation_id:
-        raise HTTPException(status_code=400, detail="conversation_id is required")
+        raise HTTPException(status_code=400, detail="conversation_id or (external_conversation_id + platform) is required")
 
     content = await file.read()
     if not content:

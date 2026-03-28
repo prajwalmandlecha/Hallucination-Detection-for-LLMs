@@ -1,17 +1,17 @@
 importScripts("highlight-normalizer.js");
 
-const BACKEND_CHAT_URL = "";
-const BACKEND_ATTACHMENT_URL = "http://127.0.0.1:5051/upload";
+const BACKEND_CHAT_URL = "http://127.0.0.1:8000/api/v1/detect";
+const BACKEND_ATTACHMENT_URL = "http://127.0.0.1:8000/api/v1/documents/upload";
 const EXTENSION_BUILD_TAG = "multi-platform-v3";
 const CHAT_SYNC_STORAGE_PREFIX = "chat_sync_state::";
+const AUTO_RUN_ON_TAB_REFRESH = false;
 
 // ── Platform URL prefix → platform key mapping ────────────────────────────────
 const PLATFORM_URL_PREFIXES = {
   chatgpt: ["https://chatgpt.com/", "https://chat.openai.com/"],
   gemini: ["https://gemini.google.com/"],
   claude: ["https://claude.ai/"],
-  deepseek: ["https://chat.deepseek.com/"],
-  copilot: ["https://copilot.microsoft.com/", "https://www.bing.com/chat"]
+  deepseek: ["https://chat.deepseek.com/"]
 };
 
 // ── Per-platform extractor file name + window function name ───────────────────
@@ -19,8 +19,7 @@ const PLATFORM_EXTRACTORS = {
   chatgpt: { file: "chatgpt-extractor.js", fn: "__hdExtractChatGptConversation" },
   gemini: { file: "gemini-extractor.js", fn: "__hdExtractGeminiConversation" },
   claude: { file: "claude-extractor.js", fn: "__hdExtractClaudeConversation" },
-  deepseek: { file: "deepseek-extractor.js", fn: "__hdExtractDeepSeekConversation" },
-  copilot: { file: "copilot-extractor.js", fn: "__hdExtractCopilotConversation" }
+  deepseek: { file: "deepseek-extractor.js", fn: "__hdExtractDeepSeekConversation" }
 };
 
 console.log("[AI Chat Extractor] Background service worker booted:", {
@@ -52,7 +51,61 @@ function getSupportedPlatform(url) {
 // ── Incremental sync (chrome.storage) ─────────────────────────────────────────
 
 function getConversationSyncKey(payload) {
-  return payload?.conversation?.id || payload?.conversation?.url || null;
+  const normalizePart = (value, maxLength = 180) =>
+    String(value || "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, maxLength);
+
+  const platform = normalizePart(payload?.platform || "unknown", 40);
+  const conversationId = normalizePart(payload?.conversation?.id, 160);
+  if (conversationId) {
+    return `${platform}::id::${conversationId}`;
+  }
+
+  const normalizeUrl = (rawUrl) => {
+    try {
+      const parsedUrl = new URL(rawUrl);
+      const stableParams = ["conversationId", "chatId", "threadId", "convId", "id"];
+      const reducedParams = new URLSearchParams();
+
+      for (const param of stableParams) {
+        const value = parsedUrl.searchParams.get(param);
+        if (value) {
+          reducedParams.set(param, value);
+        }
+      }
+
+      const query = reducedParams.toString();
+      return `${parsedUrl.origin}${parsedUrl.pathname}${query ? `?${query}` : ""}`.toLowerCase();
+    } catch {
+      return normalizePart(rawUrl, 240);
+    }
+  };
+
+  const conversationUrl = normalizeUrl(payload?.conversation?.url || "");
+  const conversationTitle = normalizePart(payload?.conversation?.title, 120);
+  const messageList = Array.isArray(payload?.messages) ? payload.messages : [];
+  const fingerprintSource =
+    messageList.find((message) => typeof message?.text === "string" && message.text.trim())?.text || "";
+  const messageFingerprint = fingerprintSource
+    ? `${messageList.length}:${normalizePart(fingerprintSource, 80)}`
+    : `${messageList.length}:empty`;
+
+  if (conversationUrl && conversationTitle) {
+    return `${platform}::url_title::${conversationUrl}::${conversationTitle}`;
+  }
+
+  if (conversationUrl) {
+    return `${platform}::url::${conversationUrl}::${messageFingerprint}`;
+  }
+
+  if (conversationTitle) {
+    return `${platform}::title::${conversationTitle}::${messageFingerprint}`;
+  }
+
+  return null;
 }
 
 function getConversationStorageKey(conversationKey) {
@@ -121,9 +174,28 @@ function buildIncrementalChatPayload(payload, syncState, conversationKey) {
       }
     },
     nextSyncState: lastMessage
-      ? { lastMessageId: lastMessage.id, lastMessageIndex: lastMessage.index, syncedAt: new Date().toISOString() }
-      : syncState
+      ? {
+          lastMessageId: lastMessage.id,
+          lastMessageIndex: lastMessage.index,
+          fullMessageCount: allMessages.length,
+          syncedAt: new Date().toISOString()
+        }
+      : {
+          ...(syncState || {}),
+          fullMessageCount: allMessages.length,
+          syncedAt: new Date().toISOString()
+        }
   };
+}
+
+function isEmptyBackendDetectionResponse(responseBody) {
+  if (!responseBody || typeof responseBody !== "object") {
+    return true;
+  }
+
+  const claims = Array.isArray(responseBody?.claims) ? responseBody.claims : [];
+  const results = Array.isArray(responseBody?.results) ? responseBody.results : [];
+  return claims.length === 0 && results.length === 0;
 }
 
 // ── File upload to Express server ─────────────────────────────────────────────
@@ -244,12 +316,7 @@ async function sendChatPayloadToBackend(payload, platform) {
   console.log(label, preparedPayload.payload);
 
   if (!preparedPayload.payload.messages.length) {
-    return {
-      attempted: false,
-      reason: "No new messages were found for this conversation.",
-      sync: preparedPayload.payload.incrementalSync,
-      preparedPayload: preparedPayload.payload
-    };
+    console.log("[AI Chat Extractor] No new messages for this conversation, checking for past validations...");
   }
 
   if (!BACKEND_CHAT_URL) {
@@ -273,6 +340,70 @@ async function sendChatPayloadToBackend(payload, platform) {
 
     let responseBody = null;
     try { responseBody = await response.json(); } catch { /* noop */ }
+
+    const hasNoNewMessages = !preparedPayload.payload.messages.length;
+    const hasExtractedMessages = Array.isArray(payload?.messages) && payload.messages.length > 0;
+    const previousFullCount = Number(syncState?.fullMessageCount || 0);
+    const currentFullCount = Array.isArray(payload?.messages) ? payload.messages.length : 0;
+    const hasHistoryExpansion =
+      hasNoNewMessages &&
+      hasExtractedMessages &&
+      previousFullCount > 0 &&
+      currentFullCount > previousFullCount;
+    const shouldForceFullResync =
+      response.ok &&
+      hasNoNewMessages &&
+      hasExtractedMessages &&
+      (isEmptyBackendDetectionResponse(responseBody) || hasHistoryExpansion);
+
+    if (shouldForceFullResync) {
+      console.warn(
+        "[AI Chat Extractor] Zero-delta sync needs full recovery; retrying with full conversation payload.",
+        {
+          platform,
+          conversationKey,
+          incrementalSync: preparedPayload.payload.incrementalSync,
+          reason: hasHistoryExpansion ? "history_expanded" : "empty_backend_response"
+        }
+      );
+
+      const forcedFullSync = buildIncrementalChatPayload(payload, null, conversationKey);
+      const recoveryPayload = {
+        ...forcedFullSync.payload,
+        incrementalSync: {
+          ...forcedFullSync.payload.incrementalSync,
+          recoveryMode: hasHistoryExpansion ? "history_expanded_resync" : "force_full_resync"
+        }
+      };
+
+      const recoveryResponse = await fetch(BACKEND_CHAT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(recoveryPayload)
+      });
+
+      let recoveryBody = null;
+      try { recoveryBody = await recoveryResponse.json(); } catch { /* noop */ }
+
+      if (recoveryResponse.ok) {
+        await setConversationSyncState(conversationKey, forcedFullSync.nextSyncState);
+      }
+
+      return {
+        attempted: true,
+        ok: recoveryResponse.ok,
+        status: recoveryResponse.status,
+        response: recoveryBody,
+        sync: recoveryPayload.incrementalSync,
+        preparedPayload: recoveryPayload,
+        fallbackTriggered: true,
+        initialAttempt: {
+          status: response.status,
+          response: responseBody,
+          sync: preparedPayload.payload.incrementalSync
+        }
+      };
+    }
 
     if (response.ok) {
       await setConversationSyncState(conversationKey, preparedPayload.nextSyncState);
@@ -330,7 +461,7 @@ async function logDebugPayloadInTab(tabId, label, payload) {
 
 // ── Extension icon click: full extract → sync → highlight pipeline ─────────────
 
-chrome.action.onClicked.addListener(async (tab) => {
+async function runExtractionForTab(tab) {
   if (!tab?.id) {
     console.warn("[AI Chat Extractor] No active tab id found.");
     return;
@@ -338,7 +469,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 
   const platform = getSupportedPlatform(tab.url || "");
   if (!platform) {
-    console.warn("[AI Chat Extractor] Unsupported tab. Open a ChatGPT, Gemini, Claude, DeepSeek, or Copilot conversation first.");
+    console.warn("[AI Chat Extractor] Unsupported tab. Open ChatGPT, Gemini, Claude, or DeepSeek conversation first.");
     return;
   }
 
@@ -367,4 +498,20 @@ chrome.action.onClicked.addListener(async (tab) => {
   } catch (error) {
     console.error(`[AI Chat Extractor] Extraction failed for platform '${platform}':`, error);
   }
-});
+}
+
+chrome.action.onClicked.addListener(runExtractionForTab);
+
+if (AUTO_RUN_ON_TAB_REFRESH) {
+  const debounceTimers = {};
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === "complete" || changeInfo.url) {
+      if (debounceTimers[tabId]) clearTimeout(debounceTimers[tabId]);
+      debounceTimers[tabId] = setTimeout(() => {
+        if (tab.url && getSupportedPlatform(tab.url)) {
+          runExtractionForTab(tab);
+        }
+      }, 2500); // 2.5 second delay allows SPA frameworks (like Next.js on ChatGPT) to finish manipulating the DOM
+    }
+  });
+}

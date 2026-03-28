@@ -6,6 +6,8 @@ import {
   sendChatMessage,
   detectHallucinations,
   scoreToRisk,
+  getConversation,
+  addMessageToConversation,
   type BackendModel,
   type ChatMessage,
 } from "@/lib/api";
@@ -21,17 +23,6 @@ export interface ChatPaneData {
 
 interface ChatContainerProps {
   activeChatId: string;
-}
-
-const WELCOME_MSG = "Ready for parallel analysis. Type a message to begin.";
-
-function makeWelcome(paneId: string): MessageProps {
-  return {
-    id: `sys-init-${paneId}`,
-    role: "assistant",
-    content: WELCOME_MSG,
-    timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-  };
 }
 
 export function ChatContainer({ activeChatId }: ChatContainerProps) {
@@ -58,12 +49,48 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
 
   // ── Reset panes on new session ──────────────────────────────────────────
   useEffect(() => {
-    const firstModel = models[0]?.id ?? "llama-3.3-70b-versatile";
-    const paneId = `pane-root-${Date.now()}`;
-    setPanes([{ id: paneId, modelId: firstModel, messages: [makeWelcome(paneId)] }]);
-    setIsModelSelectionLocked(false);
-    setIsThinking(false);
-    setError(null);
+    if (!activeChatId) return;
+    
+    console.log(`[ChatContainer] Loading conversation ID: ${activeChatId}`);
+    
+    getConversation(activeChatId).then(conv => {
+      const firstModel = models[0]?.id ?? "llama-3.3-70b-versatile";
+      
+      // If no messages, just clear panes to a blank first model
+      if (!conv.messages || conv.messages.length === 0) {
+        setPanes([{ id: `pane-root-${Date.now()}`, modelId: firstModel, messages: [] }]);
+        setIsModelSelectionLocked(false);
+        setIsThinking(false);
+        setError(null);
+        return;
+      }
+
+      // If we have messages, we only support a single unified thread loaded right now 
+      // (Advanced branching logic would be needed to reconstruct multiple panes from db history)
+      // For now, load history into a single pane
+      const mappedMessages = conv.messages.map(m => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        spans: [] // Not persisted in DB right now, would need analysis matching
+      }));
+      
+      const lastAssitantMsg = conv.messages.filter(m => m.role === "assistant").pop();
+
+      setPanes([{ 
+        id: `pane-root-${Date.now()}`, 
+        modelId: lastAssitantMsg?.model_id || firstModel, 
+        messages: mappedMessages 
+      }]);
+      setIsModelSelectionLocked(true); // Locked if history exists
+      setIsThinking(false);
+      setError(null);
+      
+    }).catch(err => {
+      console.error(`Failed to load conversation ${activeChatId}`, err);
+    })
+
   }, [activeChatId, models]);
 
   const handleAddPane = () => {
@@ -81,7 +108,7 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
 
     setPanes((prev) => [
       ...prev,
-      { id: newPaneId, modelId: nextModel, messages: [makeWelcome(newPaneId)] },
+      { id: newPaneId, modelId: nextModel, messages: [] },
     ]);
   };
 
@@ -112,6 +139,18 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
     );
 
     setIsThinking(true);
+    
+    // Save user message to database (using the activeChatId)
+    if (activeChatId) {
+      try {
+        await addMessageToConversation(activeChatId, "user", content);
+        console.log(`[ChatContainer] Saved user message to conversation ${activeChatId}`);
+        // Notify sidebar to refresh, in case this is the first message that sets the title
+        window.dispatchEvent(new Event("refresh-sidebar"));
+      } catch (err) {
+        console.error("Failed to save user message to DB", err);
+      }
+    }
 
     // 2. Fire a real API call for each pane in parallel
     const currentPanes = panes; // snapshot before state updates
@@ -153,6 +192,16 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
             }));
         } catch (detErr) {
           console.warn("Detection failed (non-fatal):", detErr);
+        }
+        
+        // Save AI message to DB
+        if (activeChatId) {
+          try {
+            await addMessageToConversation(activeChatId, "assistant", responseText, pane.modelId);
+            console.log(`[ChatContainer] Saved AI message (model: ${pane.modelId}) to conversation ${activeChatId}`);
+          } catch (err) {
+            console.error("Failed to save AI message to DB", err);
+          }
         }
 
         return { paneId: pane.id, responseText, spans };

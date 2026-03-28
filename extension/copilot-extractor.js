@@ -16,7 +16,32 @@
 
     // Copilot is a SPA — the conversation ID is not reliably in the URL.
     function getConversationId() {
-      return window.location.pathname.match(/\/(?:chat|chats?)\/([^/?#]+)/)?.[1] || null;
+      const pathId = window.location.pathname.match(/\/(?:chat|chats?|conversation|conversations|thread)\/([^/?#]+)/)?.[1];
+      if (pathId) {
+        return pathId;
+      }
+
+      try {
+        const url = new URL(window.location.href);
+        for (const key of ["conversationId", "chatId", "threadId", "id", "convId"]) {
+          const value = url.searchParams.get(key);
+          if (value) {
+            return value;
+          }
+        }
+      } catch {
+        // Ignore URL parsing failures and fall back to DOM attributes.
+      }
+
+      for (const selector of ["[data-conversation-id]", "[data-chat-id]", "[data-thread-id]"]) {
+        const node = document.querySelector(selector);
+        const value = node?.getAttribute("data-conversation-id") || node?.getAttribute("data-chat-id") || node?.getAttribute("data-thread-id");
+        if (value) {
+          return value;
+        }
+      }
+
+      return null;
     }
 
     function getConversationTitle() {

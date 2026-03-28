@@ -18,7 +18,7 @@ from sqlalchemy import select
 
 from app.models.detect import ConversationMessage
 from app.db.engine import async_session_maker
-from app.db.models import ExtractedEntity, EntityRelationship, Message
+from app.db.models import ExtractedEntity, Message
 
 logger = logging.getLogger(__name__)
 
