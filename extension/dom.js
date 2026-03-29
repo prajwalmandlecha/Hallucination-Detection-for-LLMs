@@ -4,6 +4,56 @@
 	const TOOLTIP_ID = "hd-tooltip";
 	const STYLE_ID = "hd-highlight-style";
 	const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "CODE", "PRE", "MARK", "NOSCRIPT", "TEXTAREA"]);
+	const SUMMARY_BANNER_ID = "hd-summary-banner";
+	const NAV_WATCHER_KEY = "__hdNavWatcherBound";
+	const DISMISS_KEY = "__hdSummaryDismissedUntilNavigation";
+	const DISMISS_STORAGE_PREFIX = "hdSummaryDismissed:";
+
+	function getDismissStorageKey() {
+		return `${DISMISS_STORAGE_PREFIX}${window.location.origin}${window.location.pathname}`;
+	}
+
+	function isSummaryDismissed() {
+		try {
+			return window.localStorage.getItem(getDismissStorageKey()) === "1";
+		} catch {
+			return Boolean(window[DISMISS_KEY]);
+		}
+	}
+
+	function setSummaryDismissed(value) {
+		window[DISMISS_KEY] = Boolean(value);
+		try {
+			const key = getDismissStorageKey();
+			if (value) {
+				window.localStorage.setItem(key, "1");
+			} else {
+				window.localStorage.removeItem(key);
+			}
+		} catch {
+			// Ignore storage failures (private mode, blocked storage, etc.)
+		}
+	}
+
+	function escapeHtml(value) {
+		return String(value ?? "")
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/\"/g, "&quot;")
+			.replace(/'/g, "&#039;");
+	}
+
+	function safeParseJson(value, fallback) {
+		if (!value) {
+			return fallback;
+		}
+		try {
+			return JSON.parse(value);
+		} catch {
+			return fallback;
+		}
+	}
 
 	// Escapes user text so it can be used safely inside a RegExp.
 	function escapeRegExp(value) {
@@ -13,6 +63,89 @@
 	// Normalizes sentence text for matching and deduping.
 	function normalizeSentence(value) {
 		return String(value || "").replace(/\s+/g, " ").trim();
+	}
+
+	// Normalizes text for matching while preserving string length.
+	// Important: replacements must be 1:1 so index mapping stays valid.
+	function normalizeForMatch(value) {
+		return String(value || "")
+			.replace(/\u00A0/g, " ") // NBSP
+			.replace(/[\u200B\u200C\u200D\uFEFF]/g, "") // zero-width chars
+			.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015]/g, "-") // hyphen/dash variants
+			.replace(/[\u2018\u2019\u201A\u201B]/g, "'") // single quotes
+			.replace(/[\u201C\u201D\u201E\u201F]/g, "\""); // double quotes
+	}
+
+	function buildCandidateRegex(candidateNormalized) {
+		const whitespacePattern = "[\\s\\u00A0\\u200B\\u200C\\u200D]*";
+		const tokens = String(candidateNormalized || "").split(/\s+/).filter(Boolean);
+		if (!tokens.length) {
+			return null;
+		}
+
+		const tokenPatterns = tokens.map((token) => {
+			const lower = token.toLowerCase();
+			if (token === "+") {
+				return "(?:\\+|and)";
+			}
+			if (lower === "and") {
+				return "(?:and|\\+)";
+			}
+			return escapeRegExp(token);
+		});
+
+		return new RegExp(tokenPatterns.join(whitespacePattern), "gi");
+	}
+
+	// Builds progressively looser match candidates when backend claims are normalized
+	// assertions rather than exact substrings from the assistant message.
+	function buildMatchCandidates(sentence) {
+		const normalized = normalizeSentence(sentence);
+		if (!normalized) {
+			return [];
+		}
+
+		const candidates = [];
+		const seen = new Set();
+
+		function addCandidate(value) {
+			const candidate = normalizeSentence(value).replace(/[.!?]+$/, "");
+			if (!candidate || candidate.length < 18) {
+				return;
+			}
+			const key = candidate.toLowerCase();
+			if (seen.has(key)) {
+				return;
+			}
+			seen.add(key);
+			candidates.push(candidate);
+		}
+
+		addCandidate(normalized);
+
+		// Trim leading proper-name subject + copula/aux patterns.
+		addCandidate(
+			normalized.replace(
+				/^(?:[A-Z][\w'’-]*)(?:\s+[A-Z][\w'’-]*){0,4}\s+(?:is|are|was|were|has|have|had|did|does|do|can|could|may|might|would|should|will)\s+/,
+				""
+			)
+		);
+
+		// Trim common lead-in clauses that may vary between extraction and response text.
+		addCandidate(normalized.replace(/^(?:according to .*?,|historians .*? claim(?:ed)?\s+)/i, ""));
+
+		const words = normalized.split(/\s+/).filter(Boolean);
+		const windowSizes = [10, 8, 6];
+		for (const windowSize of windowSizes) {
+			if (words.length < windowSize) {
+				continue;
+			}
+			for (let index = 0; index <= words.length - windowSize; index += 1) {
+				addCandidate(words.slice(index, index + windowSize).join(" "));
+			}
+		}
+
+		return candidates;
 	}
 
 	// Clears previously injected highlight marks before a fresh pass.
@@ -158,7 +291,28 @@
 				min-width: 320px;
 				border: 1px solid rgba(255,255,255,0.1);
 				transition: opacity 0.3s, transform 0.3s;
-				pointer-events: none;
+				pointer-events: auto;
+			}
+			#hd-summary-banner .hd-banner-close {
+				position: absolute;
+				top: 6px;
+				right: 8px;
+				width: 26px;
+				height: 26px;
+				border-radius: 6px;
+				border: 1px solid rgba(255,255,255,0.12);
+				background: rgba(17, 24, 39, 0.65);
+				color: #e5e7eb;
+				cursor: pointer;
+				font-size: 16px;
+				line-height: 1;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			}
+			#hd-summary-banner .hd-banner-close:hover {
+				background: rgba(17, 24, 39, 0.9);
+				border-color: rgba(255,255,255,0.2);
 			}
 			#hd-summary-banner .hd-banner-score {
 				font-size: 16px;
@@ -172,6 +326,29 @@
 			body.hd-hidden #hd-summary-banner {
 				opacity: 0;
 				transform: translate(-50%, -20px);
+			}
+
+			#hd-summary-banner[data-hd-state="loading"] .hd-banner-score,
+			#hd-summary-banner[data-hd-state="idle"] .hd-banner-score,
+			#hd-summary-banner[data-hd-state="error"] .hd-banner-score {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+
+			#hd-summary-banner .hd-loader {
+				width: 14px;
+				height: 14px;
+				border: 2px solid rgba(255, 255, 255, 0.35);
+				border-top-color: #60a5fa;
+				border-radius: 999px;
+				animation: hd-spin 0.9s linear infinite;
+			}
+
+			@keyframes hd-spin {
+				to {
+					transform: rotate(360deg);
+				}
 			}
 		`;
 
@@ -208,7 +385,9 @@
 			return;
 		}
 
-		const tooltip = ensureTooltip();
+		function getTooltip() {
+			return ensureTooltip();
+		}
 
 		document.addEventListener("mouseover", (event) => {
 			const target = event.target instanceof Element ? event.target.closest(`.${HIGHLIGHT_CLASS}`) : null;
@@ -216,15 +395,20 @@
 				return;
 			}
 
+			const tooltip = getTooltip();
+
 			const score = target.getAttribute("data-hd-score") || "N/A";
 			const status = target.getAttribute("data-hd-status") || "UNKNOWN";
 			const type = target.getAttribute("data-hd-type");
 			const entailment = target.getAttribute("data-hd-ent");
 			const contradiction = target.getAttribute("data-hd-con");
 			const neutral = target.getAttribute("data-hd-neu");
-			const sourcesChecked = target.getAttribute("data-hd-src") || "N/A";
-			const citations = target.getAttribute("data-hd-citations") || "N/A";
+			const sourcesChecked = target.getAttribute("data-hd-src") || "";
+			const citations = target.getAttribute("data-hd-citations") || "";
 			const note = target.getAttribute("data-hd-note") || "No details available.";
+			const snippet = target.getAttribute("data-hd-snippet") || "";
+			const sourcesJson = target.getAttribute("data-hd-sources-json") || "";
+			const snippetsJson = target.getAttribute("data-hd-snippets-json") || "";
 
 			let statusColor = "#f9fafb";
 			if (status === "CONTRADICTED") statusColor = "#ef4444";
@@ -237,6 +421,31 @@
 			if (entailment && entailment !== "null") extraHtml += `<div class="hd-row" style="display:flex; justify-content:space-between;"><span class="hd-label">Entailment:</span> <span>${parseFloat(entailment).toFixed(3)}</span></div>`;
 			if (contradiction && contradiction !== "null") extraHtml += `<div class="hd-row" style="display:flex; justify-content:space-between;"><span class="hd-label">Contradiction:</span> <span>${parseFloat(contradiction).toFixed(3)}</span></div>`;
 			if (neutral && neutral !== "null") extraHtml += `<div class="hd-row" style="display:flex; justify-content:space-between;"><span class="hd-label">Neutral:</span> <span>${parseFloat(neutral).toFixed(3)}</span></div>`;
+			const parsedSources = safeParseJson(sourcesJson, []);
+			const parsedSnippets = safeParseJson(snippetsJson, []);
+
+			const sourcesListHtml = Array.isArray(parsedSources) && parsedSources.length
+				? `<ol style="margin:4px 0 0 18px; padding:0;">${parsedSources
+						.map((value) => `<li style="margin:2px 0;">${escapeHtml(value)}</li>`)
+						.join("")}</ol>`
+				: (sourcesChecked ? `<div style="margin-top:4px;">${escapeHtml(sourcesChecked)}</div>` : "");
+
+			const snippetsListHtml = Array.isArray(parsedSnippets) && parsedSnippets.length
+				? `<ol style="margin:4px 0 0 18px; padding:0;">${parsedSnippets
+						.map((entry) => {
+							if (!entry || typeof entry !== "object") {
+								return "";
+							}
+							const sourceNumber = Number(entry.sourceNumber);
+							const prefix = Number.isFinite(sourceNumber) && sourceNumber > 0 ? `[${sourceNumber}] ` : "";
+							return `<li style="margin:2px 0;">${escapeHtml(prefix + String(entry.text || ""))}</li>`;
+						})
+						.join("")}</ol>`
+				: (snippet ? `<div style="margin-top:4px;">${escapeHtml(snippet)}</div>` : "");
+
+			const citationsHtml = citations
+				? `<div class="hd-row" style="margin-top:2px;"><span class="hd-label">Citations:</span> ${escapeHtml(citations)}</div>`
+				: "";
 
 			tooltip.innerHTML = `
 				<div class="hd-row" style="margin-bottom: 8px; font-size: 14px; font-weight: bold; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 6px;">
@@ -244,9 +453,10 @@
 				</div>
 				<div class="hd-row" style="display:flex; justify-content:space-between;"><span class="hd-label">Risk Score:</span> <span>${score}</span></div>
 				${extraHtml}
-				<div class="hd-row" style="margin-top:6px;"><span class="hd-label">Sources:</span> ${sourcesChecked}</div>
-				<div class="hd-row" style="margin-top:2px;"><span class="hd-label">Citations:</span> ${citations}</div>
-				<div class="hd-row" style="margin-top:4px;"><span class="hd-label">Note:</span> ${note}</div>
+				<div class="hd-row" style="margin-top:6px;"><span class="hd-label">Sources:</span>${sourcesListHtml || " <span>N/A</span>"}</div>
+				${citationsHtml}
+				<div class="hd-row" style="margin-top:4px;"><span class="hd-label">Snippets:</span>${snippetsListHtml || " <span>N/A</span>"}</div>
+				<div class="hd-row" style="margin-top:4px;"><span class="hd-label">Note:</span> ${escapeHtml(note)}</div>
 			`;
 			tooltip.style.display = "block";
 
@@ -255,7 +465,8 @@
 			}
 		}, true);
 
-		document.addEventListener("mousemove", (event) => {
+			document.addEventListener("mousemove", (event) => {
+			const tooltip = getTooltip();
 			if (tooltip.style.display !== "block") {
 				return;
 			}
@@ -273,6 +484,7 @@
 				return;
 			}
 
+			const tooltip = getTooltip();
 			tooltip.style.display = "none";
 		}, true);
 
@@ -378,7 +590,7 @@
 		for (const node of nodes) {
 			const start = fullText.length;
 			const text = node.nodeValue || "";
-			fullText += text;
+			fullText += normalizeForMatch(text);
 			const end = fullText.length;
 			map.push({ node, start, end });
 		}
@@ -407,13 +619,24 @@
 			return 0;
 		}
 
-		// Allow missing or extra whitespace/invisible characters between words
-		const regex = new RegExp(escapeRegExp(sentence).replace(/\s+/g, "[\\s\\u200B\\u200C\\u200D]*"), "gi");
-		let match;
-		const matches = [];
+		let matches = [];
+		for (const candidate of buildMatchCandidates(sentence)) {
+			const candidateNormalized = normalizeForMatch(candidate);
+			const regex = buildCandidateRegex(candidateNormalized);
+			if (!regex) {
+				continue;
+			}
+			let match;
+			const candidateMatches = [];
 
-		while ((match = regex.exec(fullText)) !== null) {
-			matches.push({ start: match.index, end: match.index + match[0].length });
+			while ((match = regex.exec(fullText)) !== null) {
+				candidateMatches.push({ start: match.index, end: match.index + match[0].length });
+			}
+
+			if (candidateMatches.length) {
+				matches = candidateMatches;
+				break;
+			}
 		}
 
 		if (!matches.length) return 0;
@@ -447,6 +670,15 @@
 				mark.setAttribute("data-hd-src", String(statementMeta.sources_checked || ""));
 				mark.setAttribute("data-hd-citations", Array.isArray(statementMeta.citations) ? statementMeta.citations.filter(Boolean).join(", ") : "N/A");
 				mark.setAttribute("data-hd-note", statementMeta.note || "No details available.");
+				mark.setAttribute("data-hd-snippet", statementMeta.snippet || "");
+				mark.setAttribute(
+					"data-hd-sources-json",
+					Array.isArray(statementMeta.sources) ? JSON.stringify(statementMeta.sources) : "[]"
+				);
+				mark.setAttribute(
+					"data-hd-snippets-json",
+					Array.isArray(statementMeta.snippets) ? JSON.stringify(statementMeta.snippets) : "[]"
+				);
 
 				middleNode.parentNode.replaceChild(mark, middleNode);
 			}
@@ -475,30 +707,125 @@
 
 	// Injects and updates the top visual summary banner
 	function ensureSummaryBanner(summary) {
-		let banner = document.getElementById("hd-summary-banner");
+		let banner = document.getElementById(SUMMARY_BANNER_ID);
 		if (!banner) {
 			banner = document.createElement("div");
-			banner.id = "hd-summary-banner";
+			banner.id = SUMMARY_BANNER_ID;
 			document.body.appendChild(banner);
 		}
 
-		if (!summary) {
+		if (isSummaryDismissed()) {
 			banner.style.display = "none";
 			return;
 		}
 
+		if (!summary) {
+			banner.removeAttribute("data-hd-state");
+			banner.style.display = "none";
+			return;
+		}
+
+		const summaryState = String(summary.state || "result").toLowerCase();
+		banner.setAttribute("data-hd-state", summaryState);
 		banner.style.display = "flex";
+
+		function attachClose() {
+			const closeBtn = banner.querySelector(".hd-banner-close");
+			if (!closeBtn) {
+				return;
+			}
+			closeBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				setSummaryDismissed(true);
+				banner.style.display = "none";
+			});
+		}
+
+		if (summaryState === "loading") {
+			banner.innerHTML = `
+				<button type="button" class="hd-banner-close" aria-label="Close">×</button>
+				<div class="hd-banner-score" style="color: #60a5fa;">
+					<span class="hd-loader" aria-hidden="true"></span>
+					Analyzing Conversation
+				</div>
+				<div class="hd-banner-msg">${escapeHtml(summary.message || "Please wait while detection runs...")}</div>
+			`;
+			attachClose();
+			return;
+		}
+
+		if (summaryState === "idle") {
+			banner.innerHTML = `
+				<button type="button" class="hd-banner-close" aria-label="Close">×</button>
+				<div class="hd-banner-score" style="color: ${summary.color || "#9CA3AF"};">
+					Awaiting New Analysis
+				</div>
+				<div class="hd-banner-msg">${escapeHtml(summary.message || "No new assistant response detected.")}</div>
+			`;
+			attachClose();
+			return;
+		}
+
+		if (summaryState === "error") {
+			banner.innerHTML = `
+				<button type="button" class="hd-banner-close" aria-label="Close">×</button>
+				<div class="hd-banner-score" style="color: #ef4444;">
+					Detection Failed
+				</div>
+				<div class="hd-banner-msg">${escapeHtml(summary.message || "Please try again.")}</div>
+			`;
+			attachClose();
+			return;
+		}
+
+		const numericScore = Number(summary.score);
+		const scoreLabel = Number.isFinite(numericScore) ? numericScore.toFixed(1) : "N/A";
+
 		banner.innerHTML = `
+			<button type="button" class="hd-banner-close" aria-label="Close">×</button>
 			<div class="hd-banner-score" style="color: ${summary.color};">
-				Overall Risk: ${summary.score > 0 ? Number(summary.score).toFixed(1) : "N/A"} (${summary.level})
+				Overall Risk: ${scoreLabel} (${summary.level || "UNKNOWN"})
 			</div>
-			<div class="hd-banner-msg">${summary.message}</div>
+			<div class="hd-banner-msg">${escapeHtml(summary.message)}</div>
 		`;
+		attachClose();
+	}
+
+	function resetInjectedUiForNavigation() {
+		window[DISMISS_KEY] = false;
+		removeExistingHighlights();
+		clearMessageBadges();
+		ensureSummaryBanner(null);
+		const tooltip = document.getElementById(TOOLTIP_ID);
+		if (tooltip) {
+			tooltip.style.display = "none";
+		}
+	}
+
+	function bindNavigationWatcher() {
+		if (window[NAV_WATCHER_KEY]) {
+			return;
+		}
+		window[NAV_WATCHER_KEY] = true;
+
+		let lastHref = String(window.location.href);
+		setInterval(() => {
+			const href = String(window.location.href);
+			if (href === lastHref) {
+				return;
+			}
+			lastHref = href;
+			resetInjectedUiForNavigation();
+		}, 500);
+	}
+
+	function clearMessageBadges() {
+		document.querySelectorAll('.hd-message-badge').forEach((badge) => badge.remove());
 	}
 
 	function applyMessageBadges(messageResults, assistantNodes) {
-		// Clean up existing badges
-		document.querySelectorAll('.hd-message-badge').forEach(b => b.remove());
+		clearMessageBadges();
 		
 		if (!messageResults || !assistantNodes) return;
 		
@@ -541,9 +868,11 @@
 
 		ensureStyles();
 		removeExistingHighlights();
+		clearMessageBadges();
 		ensureTooltip();
 		ensureToggleButton(); // Make sure the toggle button is in the DOM
 		ensureSummaryBanner(summary);
+		bindNavigationWatcher();
 		bindTooltipEvents();
 
 		const assistantNodes = getAssistantMessageNodes();
@@ -611,5 +940,18 @@
 		};
 	}
 
+	function setDetectionState(statePayload) {
+		ensureStyles();
+		removeExistingHighlights();
+		clearMessageBadges();
+		ensureTooltip();
+		ensureToggleButton();
+		bindTooltipEvents();
+		ensureSummaryBanner(statePayload || { state: "loading" });
+
+		return { ok: true };
+	}
+
 	window.__hdApplyHighlights = applyHighlights;
+	window.__hdSetDetectionState = setDetectionState;
 })();

@@ -4,6 +4,8 @@ const BACKEND_CHAT_URL = "http://127.0.0.1:8000/api/v1/detect";
 const BACKEND_ATTACHMENT_URL = "http://127.0.0.1:8000/api/v1/documents/upload";
 const EXTENSION_BUILD_TAG = "multi-platform-v3";
 const CHAT_SYNC_STORAGE_PREFIX = "chat_sync_state::";
+const TAB_CONVERSATION_STATE_STORAGE_PREFIX = "tab_conversation_state::";
+const REAL_CONVERSATION_ALIAS_STORAGE_PREFIX = "real_conversation_alias::";
 const AUTO_RUN_ON_TAB_REFRESH = false;
 
 // ── Platform URL prefix → platform key mapping ────────────────────────────────
@@ -20,6 +22,13 @@ const PLATFORM_EXTRACTORS = {
   gemini: { file: "gemini-extractor.js", fn: "__hdExtractGeminiConversation" },
   claude: { file: "claude-extractor.js", fn: "__hdExtractClaudeConversation" },
   deepseek: { file: "deepseek-extractor.js", fn: "__hdExtractDeepSeekConversation" }
+};
+
+const PLATFORM_ATTACHMENT_OBSERVERS = {
+  chatgpt: "chatgpt-attachment-observer.js",
+  gemini: "gemini-attachment-observer.js",
+  claude: "claude-attachment-observer.js",
+  deepseek: "deepseek-attachment-observer.js"
 };
 
 console.log("[AI Chat Extractor] Background service worker booted:", {
@@ -48,15 +57,267 @@ function getSupportedPlatform(url) {
   return null;
 }
 
+function normalizeStoragePart(value, maxLength = 240) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeConversationId(value) {
+  return normalizeStoragePart(value, 200);
+}
+
+function getTabConversationStateStorageKey(tabId) {
+  return `${TAB_CONVERSATION_STATE_STORAGE_PREFIX}${tabId}`;
+}
+
+function getRealConversationAliasStorageKey(platform, realConversationId) {
+  return `${REAL_CONVERSATION_ALIAS_STORAGE_PREFIX}${normalizeStoragePart(platform, 40)}::${normalizeConversationId(realConversationId)}`;
+}
+
+async function getTabConversationState(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return null;
+  }
+
+  const storageKey = getTabConversationStateStorageKey(tabId);
+  const stored = await chrome.storage.local.get(storageKey);
+  return stored?.[storageKey] || null;
+}
+
+async function setTabConversationState(tabId, state) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  const storageKey = getTabConversationStateStorageKey(tabId);
+  await chrome.storage.local.set({ [storageKey]: state });
+}
+
+async function clearTabConversationState(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  const storageKey = getTabConversationStateStorageKey(tabId);
+  await chrome.storage.local.remove(storageKey);
+}
+
+async function getRealConversationAlias(platform, realConversationId) {
+  const normalizedConversationId = normalizeConversationId(realConversationId);
+  if (!normalizedConversationId) {
+    return null;
+  }
+
+  const storageKey = getRealConversationAliasStorageKey(platform, normalizedConversationId);
+  const stored = await chrome.storage.local.get(storageKey);
+  return stored?.[storageKey] || null;
+}
+
+async function setRealConversationAlias(platform, realConversationId, backendConversationId) {
+  const normalizedConversationId = normalizeConversationId(realConversationId);
+  const normalizedBackendConversationId = normalizeConversationId(backendConversationId);
+
+  if (!normalizedConversationId || !normalizedBackendConversationId) {
+    return;
+  }
+
+  const storageKey = getRealConversationAliasStorageKey(platform, normalizedConversationId);
+  await chrome.storage.local.set({
+    [storageKey]: {
+      backendConversationId: normalizedBackendConversationId,
+      mappedAt: new Date().toISOString()
+    }
+  });
+}
+
+function buildDraftBackendConversationId(platform) {
+  return `draft::${normalizeStoragePart(platform || "unknown", 40) || "unknown"}::${crypto.randomUUID()}`;
+}
+
+function cloneSerializableData(value) {
+  return JSON.parse(JSON.stringify(value || {}));
+}
+
+function clonePayloadWithBackendConversationId(payload, backendConversationId) {
+  const clonedPayload = cloneSerializableData(payload);
+  clonedPayload.conversation = {
+    ...(clonedPayload.conversation || {}),
+    id: backendConversationId || null
+  };
+  return clonedPayload;
+}
+
+async function resolveBackendConversationIdentity({ platform, conversation, tabId }) {
+  const normalizedPlatform = normalizeStoragePart(platform || conversation?.platform || "unknown", 40) || "unknown";
+  const realConversationId = normalizeConversationId(conversation?.id);
+  const conversationUrl = conversation?.url || null;
+  const nowIso = new Date().toISOString();
+
+  if (realConversationId) {
+    const storedAlias = await getRealConversationAlias(normalizedPlatform, realConversationId);
+    if (storedAlias?.backendConversationId) {
+      await setTabConversationState(tabId, {
+        backendConversationId: storedAlias.backendConversationId,
+        realConversationId,
+        platform: normalizedPlatform,
+        lastSeenUrl: conversationUrl,
+        updatedAt: nowIso
+      });
+
+      return {
+        backendConversationId: storedAlias.backendConversationId,
+        realConversationId,
+        platform: normalizedPlatform,
+        usedAlias: storedAlias.backendConversationId !== realConversationId,
+        isDraft: storedAlias.backendConversationId.startsWith("draft::")
+      };
+    }
+
+    const tabState = await getTabConversationState(tabId);
+    if (tabState?.backendConversationId && (!tabState.realConversationId || tabState.realConversationId === realConversationId)) {
+      await setRealConversationAlias(normalizedPlatform, realConversationId, tabState.backendConversationId);
+      await setTabConversationState(tabId, {
+        ...tabState,
+        realConversationId,
+        platform: normalizedPlatform,
+        lastSeenUrl: conversationUrl,
+        updatedAt: nowIso
+      });
+
+      return {
+        backendConversationId: tabState.backendConversationId,
+        realConversationId,
+        platform: normalizedPlatform,
+        usedAlias: tabState.backendConversationId !== realConversationId,
+        isDraft: tabState.backendConversationId.startsWith("draft::")
+      };
+    }
+
+    await setTabConversationState(tabId, {
+      backendConversationId: realConversationId,
+      realConversationId,
+      platform: normalizedPlatform,
+      lastSeenUrl: conversationUrl,
+      updatedAt: nowIso
+    });
+
+    return {
+      backendConversationId: realConversationId,
+      realConversationId,
+      platform: normalizedPlatform,
+      usedAlias: false,
+      isDraft: false
+    };
+  }
+
+  const tabState = await getTabConversationState(tabId);
+  if (tabState?.backendConversationId && !tabState.realConversationId) {
+    await setTabConversationState(tabId, {
+      ...tabState,
+      platform: normalizedPlatform,
+      lastSeenUrl: conversationUrl,
+      updatedAt: nowIso
+    });
+
+    return {
+      backendConversationId: tabState.backendConversationId,
+      realConversationId: null,
+      platform: normalizedPlatform,
+      usedAlias: true,
+      isDraft: true
+    };
+  }
+
+  const draftConversationId = buildDraftBackendConversationId(normalizedPlatform);
+  await setTabConversationState(tabId, {
+    backendConversationId: draftConversationId,
+    realConversationId: null,
+    platform: normalizedPlatform,
+    lastSeenUrl: conversationUrl,
+    createdAt: nowIso,
+    updatedAt: nowIso
+  });
+
+  return {
+    backendConversationId: draftConversationId,
+    realConversationId: null,
+    platform: normalizedPlatform,
+    usedAlias: true,
+    isDraft: true
+  };
+}
+
+function extractConversationIdFromUrl(url, platform) {
+  if (!url || platform !== "chatgpt") {
+    return null;
+  }
+
+  return url.match(/\/c\/([^/?#]+)/)?.[1] || null;
+}
+
+async function promoteTabConversationAliasFromUrl(tabId, url) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  const platform = getSupportedPlatform(url || "");
+  const realConversationId = extractConversationIdFromUrl(url, platform);
+  if (!platform || !realConversationId) {
+    return;
+  }
+
+  const normalizedPlatform = normalizeStoragePart(platform, 40) || "unknown";
+  const normalizedRealConversationId = normalizeConversationId(realConversationId);
+  const nowIso = new Date().toISOString();
+  const existingAlias = await getRealConversationAlias(normalizedPlatform, normalizedRealConversationId);
+
+  if (existingAlias?.backendConversationId) {
+    await setTabConversationState(tabId, {
+      backendConversationId: existingAlias.backendConversationId,
+      realConversationId: normalizedRealConversationId,
+      platform: normalizedPlatform,
+      lastSeenUrl: url,
+      updatedAt: nowIso
+    });
+    return;
+  }
+
+  const tabState = await getTabConversationState(tabId);
+  if (tabState?.backendConversationId && !tabState.realConversationId) {
+    await setRealConversationAlias(normalizedPlatform, normalizedRealConversationId, tabState.backendConversationId);
+    await setTabConversationState(tabId, {
+      ...tabState,
+      realConversationId: normalizedRealConversationId,
+      platform: normalizedPlatform,
+      lastSeenUrl: url,
+      updatedAt: nowIso
+    });
+
+    console.log("[AI Chat Extractor] Promoted draft conversation alias:", {
+      tabId,
+      platform: normalizedPlatform,
+      realConversationId: normalizedRealConversationId,
+      backendConversationId: tabState.backendConversationId
+    });
+    return;
+  }
+
+  await setTabConversationState(tabId, {
+    backendConversationId: normalizedRealConversationId,
+    realConversationId: normalizedRealConversationId,
+    platform: normalizedPlatform,
+    lastSeenUrl: url,
+    updatedAt: nowIso
+  });
+}
+
 // ── Incremental sync (chrome.storage) ─────────────────────────────────────────
 
 function getConversationSyncKey(payload) {
-  const normalizePart = (value, maxLength = 180) =>
-    String(value || "")
-      .toLowerCase()
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, maxLength);
+  const normalizePart = (value, maxLength = 180) => normalizeStoragePart(value, maxLength);
 
   const platform = normalizePart(payload?.platform || "unknown", 40);
   const conversationId = normalizePart(payload?.conversation?.id, 160);
@@ -200,7 +461,7 @@ function isEmptyBackendDetectionResponse(responseBody) {
 
 // ── File upload to Express server ─────────────────────────────────────────────
 
-async function uploadAttachmentToBackend(uploadRequest) {
+async function uploadAttachmentToBackend(uploadRequest, senderTab) {
   if (!BACKEND_ATTACHMENT_URL) {
     return { attempted: false, reason: "BACKEND_ATTACHMENT_URL is not configured." };
   }
@@ -214,14 +475,22 @@ async function uploadAttachmentToBackend(uploadRequest) {
   }
 
   try {
+    const resolvedConversation = await resolveBackendConversationIdentity({
+      platform: conversation.platform,
+      conversation,
+      tabId: senderTab?.id
+    });
+
     const fileBytes = base64ToUint8Array(fileData.base64);
     const fileBlob = new Blob([fileBytes], { type: fileData.type || "application/octet-stream" });
     const formData = new FormData();
 
     formData.append("file", fileBlob, fileData.name || "upload.bin");
-    formData.append("platform", conversation.platform || "unknown");
+    formData.append("platform", resolvedConversation.platform || conversation.platform || "unknown");
     formData.append("capture_source", metadata.source || "unknown");
-    if (conversation.id) formData.append("external_conversation_id", conversation.id);
+    if (resolvedConversation.backendConversationId) {
+      formData.append("external_conversation_id", resolvedConversation.backendConversationId);
+    }
     if (conversation.url) formData.append("conversation_url", conversation.url);
     if (conversation.title) formData.append("conversation_title", conversation.title);
 
@@ -229,7 +498,13 @@ async function uploadAttachmentToBackend(uploadRequest) {
     let responseBody = null;
     try { responseBody = await response.json(); } catch { /* noop */ }
 
-    return { attempted: true, ok: response.ok, status: response.status, response: responseBody };
+    return {
+      attempted: true,
+      ok: response.ok,
+      status: response.status,
+      response: responseBody,
+      resolvedConversation
+    };
   } catch (error) {
     return { attempted: true, ok: false, status: "network_error", error: String(error) };
   }
@@ -260,7 +535,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "chatgpt_upload_attachment") {
     void (async () => {
-      const result = await uploadAttachmentToBackend(message.payload);
+      const result = await uploadAttachmentToBackend(message.payload, sender.tab);
       console.log("[AI Chat Extractor] Upload result:", {
         tabId: sender.tab?.id || null,
         url: sender.tab?.url || null,
@@ -305,15 +580,37 @@ async function extractConversationFromTab(tabId, platform) {
   return result.payload;
 }
 
+async function ensureAttachmentObserverInTab(tabId, platform) {
+  const observerFile = PLATFORM_ATTACHMENT_OBSERVERS[platform];
+  if (!observerFile) {
+    return;
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    files: [observerFile]
+  });
+}
+
 // ── Backend forwarding (with incremental sync) ────────────────────────────────
 
-async function sendChatPayloadToBackend(payload, platform) {
+async function sendChatPayloadToBackend(payload, platform, tabId) {
   const conversationKey = getConversationSyncKey(payload);
   const syncState = await getConversationSyncState(conversationKey);
-  const preparedPayload = buildIncrementalChatPayload(payload, syncState, conversationKey);
+  const resolvedConversation = await resolveBackendConversationIdentity({
+    platform,
+    conversation: payload?.conversation,
+    tabId
+  });
+  const backendPayload = clonePayloadWithBackendConversationId(payload, resolvedConversation.backendConversationId);
+  const preparedPayload = buildIncrementalChatPayload(backendPayload, syncState, conversationKey);
   const label = `[AI Chat Extractor][${platform}] Prepared chat payload to send:`;
 
-  console.log(label, preparedPayload.payload);
+  console.log(label, {
+    resolvedConversation,
+    payload: preparedPayload.payload
+  });
 
   if (!preparedPayload.payload.messages.length) {
     console.log("[AI Chat Extractor] No new messages for this conversation, checking for past validations...");
@@ -326,7 +623,8 @@ async function sendChatPayloadToBackend(payload, platform) {
       reason: "BACKEND_CHAT_URL is not configured.",
       sync: preparedPayload.payload.incrementalSync,
       preparedPayload: preparedPayload.payload,
-      advancedWithoutBackend: true
+      advancedWithoutBackend: true,
+      resolvedConversation
 
     };
   }
@@ -342,9 +640,9 @@ async function sendChatPayloadToBackend(payload, platform) {
     try { responseBody = await response.json(); } catch { /* noop */ }
 
     const hasNoNewMessages = !preparedPayload.payload.messages.length;
-    const hasExtractedMessages = Array.isArray(payload?.messages) && payload.messages.length > 0;
+    const hasExtractedMessages = Array.isArray(backendPayload?.messages) && backendPayload.messages.length > 0;
     const previousFullCount = Number(syncState?.fullMessageCount || 0);
-    const currentFullCount = Array.isArray(payload?.messages) ? payload.messages.length : 0;
+    const currentFullCount = Array.isArray(backendPayload?.messages) ? backendPayload.messages.length : 0;
     const hasHistoryExpansion =
       hasNoNewMessages &&
       hasExtractedMessages &&
@@ -367,7 +665,7 @@ async function sendChatPayloadToBackend(payload, platform) {
         }
       );
 
-      const forcedFullSync = buildIncrementalChatPayload(payload, null, conversationKey);
+      const forcedFullSync = buildIncrementalChatPayload(backendPayload, null, conversationKey);
       const recoveryPayload = {
         ...forcedFullSync.payload,
         incrementalSync: {
@@ -396,6 +694,7 @@ async function sendChatPayloadToBackend(payload, platform) {
         response: recoveryBody,
         sync: recoveryPayload.incrementalSync,
         preparedPayload: recoveryPayload,
+        resolvedConversation,
         fallbackTriggered: true,
         initialAttempt: {
           status: response.status,
@@ -415,7 +714,8 @@ async function sendChatPayloadToBackend(payload, platform) {
       status: response.status,
       response: responseBody,
       sync: preparedPayload.payload.incrementalSync,
-      preparedPayload: preparedPayload.payload
+      preparedPayload: preparedPayload.payload,
+      resolvedConversation
     };
   } catch (error) {
     return {
@@ -424,7 +724,8 @@ async function sendChatPayloadToBackend(payload, platform) {
       status: "network_error",
       error: String(error),
       sync: preparedPayload.payload.incrementalSync,
-      preparedPayload: preparedPayload.payload
+      preparedPayload: preparedPayload.payload,
+      resolvedConversation
     };
   }
 }
@@ -444,6 +745,24 @@ async function applyHighlightsInTab(tabId, highlightItems) {
       return { ok: true, ...window.__hdApplyHighlights(payload) };
     },
     args: [highlightItems]
+  });
+
+  return result;
+}
+
+async function setDetectionStateInTab(tabId, statePayload) {
+  await chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", files: ["dom.js"] });
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    func: (payload) => {
+      if (typeof window.__hdSetDetectionState !== "function") {
+        return { ok: false, reason: "Detection state entrypoint not found." };
+      }
+      return window.__hdSetDetectionState(payload);
+    },
+    args: [statePayload]
   });
 
   return result;
@@ -474,8 +793,14 @@ async function runExtractionForTab(tab) {
   }
 
   try {
+    await setDetectionStateInTab(tab.id, {
+      state: "loading",
+      message: "Detecting hallucinations for the latest conversation context..."
+    });
+
+    await ensureAttachmentObserverInTab(tab.id, platform);
     const extractedConversation = await extractConversationFromTab(tab.id, platform);
-    const backendResult = await sendChatPayloadToBackend(extractedConversation, platform);
+    const backendResult = await sendChatPayloadToBackend(extractedConversation, platform, tab.id);
 
     await logDebugPayloadInTab(
       tab.id,
@@ -496,11 +821,29 @@ async function runExtractionForTab(tab) {
     console.log(`[AI Chat Extractor][${platform}] Extracted conversation payload:`, payload);
     console.log(`[AI Chat Extractor][${platform}] JSON:\n` + JSON.stringify(payload, null, 2));
   } catch (error) {
+    try {
+      await setDetectionStateInTab(tab.id, {
+        state: "error",
+        message: "Detection request failed. Please retry after checking backend status."
+      });
+    } catch (stateError) {
+      console.warn("[AI Chat Extractor] Failed to render detection error state:", stateError);
+    }
+
     console.error(`[AI Chat Extractor] Extraction failed for platform '${platform}':`, error);
   }
 }
 
 chrome.action.onClicked.addListener(runExtractionForTab);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void clearTabConversationState(tabId);
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const candidateUrl = changeInfo.url || tab?.url || "";
+  if (candidateUrl) {
+    void promoteTabConversationAliasFromUrl(tabId, candidateUrl);
+  }
+});
 
 if (AUTO_RUN_ON_TAB_REFRESH) {
   const debounceTimers = {};

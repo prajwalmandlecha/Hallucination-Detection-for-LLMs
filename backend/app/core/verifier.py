@@ -191,7 +191,9 @@ class ClaimVerifier:
         """
         tasks = []
         source_keys = []
-        sources_checked = []
+        # NOTE: sources_checked is built *after* asyncio.gather so it only
+        # contains sources whose tasks resolved without raising an exception.
+        # Do NOT append to it here during task scheduling.
 
         # Conversation history — always check if context exists (user hasn't disabled)
         should_check_conv = (
@@ -202,7 +204,6 @@ class ClaimVerifier:
         if should_check_conv:
             tasks.append(self._check_conversation(claim, conversation_history, ner_result))
             source_keys.append(SourceType.CONVERSATION_HISTORY)
-            sources_checked.append(SourceType.CONVERSATION_HISTORY)
 
         # Web search — LLM must suggest it, user hasn't disabled, API available
         should_check_web = (
@@ -210,6 +211,14 @@ class ClaimVerifier:
             and self.web_searcher.client
             and SourceType.WEB_SEARCH in claim.suggested_sources
         )
+
+        if check_web and self.web_searcher.client and not should_check_web:
+            logger.debug(
+                "Web search skipped for claim '%s': not in suggested_sources "
+                "(suggested: %s). If this happens often check claim extractor JSON output.",
+                claim.id,
+                [s.value for s in claim.suggested_sources],
+            )
 
         has_direct_evidence = False
         if platform_sources and hasattr(claim, "citation_indices") and claim.citation_indices:
@@ -220,12 +229,11 @@ class ClaimVerifier:
                 matching_source = next((s for s in platform_sources if getattr(s, "index", None) == index), None)
                 if matching_source and matching_source.url:
                     direct_urls.append(matching_source.url)
-            
+
             for url in set(direct_urls):
                 logger.info(f"Direct citation match found for claim {claim.id}: {url}")
                 tasks.append(self.web_searcher.fetch_url_content(url))
                 source_keys.append(SourceType.WEB_SEARCH)
-                sources_checked.append(SourceType.WEB_SEARCH)
                 has_direct_evidence = True
 
         if should_check_web and not has_direct_evidence:
@@ -235,7 +243,6 @@ class ClaimVerifier:
                 max_results=3,
             ))
             source_keys.append(SourceType.WEB_SEARCH)
-            sources_checked.append(SourceType.WEB_SEARCH)
 
         # Documents — always check if docs exist (user hasn't disabled)
         should_check_docs = (
@@ -245,19 +252,22 @@ class ClaimVerifier:
         if should_check_docs:
             tasks.append(self._check_vector_db(claim, document_ids))
             source_keys.append(SourceType.VECTOR_DB)
-            sources_checked.append(SourceType.VECTOR_DB)
 
         if not tasks:
-            return [], sources_checked
+            return [], []
 
         # Run all source checks in parallel
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_evidence = []
-        for result in results:
+        sources_checked = []
+        for key, result in zip(source_keys, results):
             if isinstance(result, Exception):
-                logger.error(f"Source check failed: {result}")
+                # Don't add key to sources_checked: it threw, so it never ran properly.
+                logger.error(f"Source check failed for {key.value}: {result}")
                 continue
+            # Mark this source as checked only after it resolved (even if empty)
+            sources_checked.append(key)
             if isinstance(result, list):
                 all_evidence.extend(result)
             elif result is not None:

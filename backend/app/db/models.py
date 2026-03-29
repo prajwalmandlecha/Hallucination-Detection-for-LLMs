@@ -164,6 +164,7 @@ class ClaimAnalysis(Base):
     id = Column(String(36), primary_key=True, default=generate_uuid)
     analysis_id = Column(String(36), ForeignKey("analysis_results.id", ondelete="CASCADE"), nullable=False, index=True)
     claim_text = Column(Text, nullable=False)
+    exact_quote = Column(Text, nullable=True)
     claim_type = Column(String(50), nullable=False) # mapped from ClaimType enum
     importance_score = Column(Float, nullable=False)
     risk_score = Column(Float, nullable=False)

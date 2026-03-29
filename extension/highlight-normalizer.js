@@ -59,6 +59,131 @@
     ]);
   }
 
+  // Extracts a source snippet for tooltip display when the backend provides one.
+  function normalizeSnippet(item) {
+    function isAllowedSnippetSource(sourceType) {
+      const normalizedSourceType = normalizeComparisonText(sourceType).toLowerCase();
+      return normalizedSourceType !== "conversation_history";
+    }
+
+    const directSnippet = normalizeComparisonText(
+      item?.snippet || item?.quote || item?.excerpt || item?.supporting_snippet || ""
+    );
+    const directSnippetSourceType = item?.source_type || item?.sourceType || "";
+
+    if (directSnippet && isAllowedSnippetSource(directSnippetSourceType || "")) {
+      return directSnippet;
+    }
+
+    const evidenceItems = Array.isArray(item?.verification_details?.evidence)
+      ? item.verification_details.evidence
+      : [];
+
+    for (const evidence of evidenceItems) {
+      const evidenceSourceType = evidence?.source_type || evidence?.sourceType || "";
+      if (!isAllowedSnippetSource(evidenceSourceType)) {
+        continue;
+      }
+
+      const evidenceSnippet = normalizeComparisonText(
+        evidence?.snippet || evidence?.text || evidence?.excerpt || evidence?.quote || ""
+      );
+      if (evidenceSnippet) {
+        return evidenceSnippet;
+      }
+    }
+
+    return "";
+  }
+
+  function buildNumberedSourcesAndSnippets(item, citations) {
+    function isAllowedSourceType(sourceType) {
+      const normalized = normalizeComparisonText(sourceType).toLowerCase();
+      return normalized && normalized !== "conversation_history";
+    }
+
+    const evidenceItems = Array.isArray(item?.verification_details?.evidence)
+      ? item.verification_details.evidence
+      : [];
+
+    const sources = [];
+    const seen = new Set();
+
+    function addSource(label) {
+      const normalizedLabel = normalizeComparisonText(label);
+      if (!normalizedLabel) {
+        return null;
+      }
+
+      const key = normalizedLabel.toLowerCase();
+      const existingIndex = sources.findIndex((value) => value.toLowerCase() === key);
+      if (existingIndex >= 0) {
+        return existingIndex + 1;
+      }
+
+      if (sources.length >= 8) {
+        return null;
+      }
+
+      if (seen.has(key)) {
+        return null;
+      }
+
+      seen.add(key);
+      sources.push(normalizedLabel);
+      return sources.length;
+    }
+
+    for (const evidence of evidenceItems) {
+      const evidenceSourceType = evidence?.source_type || evidence?.sourceType || "";
+      if (!isAllowedSourceType(evidenceSourceType)) {
+        continue;
+      }
+
+      const label = normalizeComparisonText(
+        evidence?.source_title || evidence?.sourceTitle || evidence?.document_name || evidence?.documentName || evidence?.source_url || evidence?.sourceUrl || ""
+      );
+      addSource(label);
+    }
+
+    if (!sources.length) {
+      for (const citation of citations || []) {
+        addSource(citation);
+      }
+    }
+
+    const snippets = [];
+    for (const evidence of evidenceItems) {
+      const evidenceSourceType = evidence?.source_type || evidence?.sourceType || "";
+      if (!isAllowedSourceType(evidenceSourceType)) {
+        continue;
+      }
+
+      const text = normalizeComparisonText(
+        evidence?.snippet || evidence?.text || evidence?.excerpt || evidence?.quote || ""
+      );
+      if (!text) {
+        continue;
+      }
+
+      const label = normalizeComparisonText(
+        evidence?.source_title || evidence?.sourceTitle || evidence?.document_name || evidence?.documentName || evidence?.source_url || evidence?.sourceUrl || ""
+      );
+      const sourceNumber = addSource(label);
+
+      snippets.push({
+        sourceNumber: sourceNumber,
+        text: text.slice(0, 260)
+      });
+
+      if (snippets.length >= 6) {
+        break;
+      }
+    }
+
+    return { sources, snippets };
+  }
+
   // Carries forward message-targeting hints while walking nested response shapes.
   function buildTargetHints(container, inheritedHints = {}) {
     if (!container || typeof container !== "object") {
@@ -247,11 +372,31 @@
       return [];
     }
 
-    return assistantMessages
+    const inferredMatches = assistantMessages
       .filter((message) =>
         normalizeComparisonText(message.text).toLowerCase().includes(normalizedStatement)
       )
       .map((message) => message.roleIndex);
+
+    if (inferredMatches.length) {
+      return inferredMatches;
+    }
+
+    // Fallback: pin to the most-recent assistant message when the claim cannot be
+    // attributed to a specific one. Returning ALL indices (old behaviour) caused the
+    // same claim to be highlighted in every response in the conversation, which looked
+    // very glitchy. The DOM highlighter's own container-fallback (dom.js) will
+    // still broaden the search if the last-message container has no matching text.
+    if (assistantMessages.length > 0) {
+      const lastMsg = assistantMessages[assistantMessages.length - 1];
+      console.debug(
+        `[HighlightNormalizer] No message match for claim — pinning to last assistant ` +
+        `(roleIndex=${lastMsg.roleIndex}): "${normalizedStatement.slice(0, 60)}..."`
+      );
+      return [lastMsg.roleIndex];
+    }
+
+    return [];
   }
 
   // Builds the final DOM highlighter payload from backend output plus extracted chat data.
@@ -263,6 +408,56 @@
     const assistantMessages = (extractedConversation?.messages || []).filter(
       (message) => message.role === "assistant"
     );
+
+    const syncNewMessageCount = toInteger(backendResult?.sync?.newMessageCount);
+    const hasFreshMessages = syncNewMessageCount === null ? true : syncNewMessageCount > 0;
+    const hasAssistantOutput = assistantMessages.length > 0;
+    const responseClaims = Array.isArray(backendResult?.response?.claims)
+      ? backendResult.response.claims
+      : [];
+    const responseMessageResults = Array.isArray(backendResult?.response?.results)
+      ? backendResult.response.results
+      : [];
+    const extractedClaimCount = toInteger(backendResult?.response?.metadata?.claims_extracted) || 0;
+
+    const hasHistoricalAnalysis =
+      extractedClaimCount > 0 ||
+      responseClaims.length > 0 ||
+      responseMessageResults.some((messageResult) => {
+        const claimCount = Array.isArray(messageResult?.claims)
+          ? messageResult.claims.length
+          : 0;
+        return claimCount > 0;
+      });
+
+    // Avoid showing stale risk scores on reclick/zero-delta sync and on fresh chats
+    // that don't have any assistant response yet.
+    if (!hasAssistantOutput && !hasHistoricalAnalysis) {
+      return {
+        items: [],
+        summary: {
+          state: "idle",
+          level: "PENDING",
+          color: "#9CA3AF",
+          message: "Waiting for an assistant response before analysis."
+        },
+        message_results: []
+      };
+    }
+
+    if (!hasFreshMessages && !hasHistoricalAnalysis) {
+      return {
+        items: [],
+        summary: {
+          state: "idle",
+          level: "PENDING",
+          color: "#9CA3AF",
+          message: "No new assistant response since the last run."
+        },
+        message_results: []
+      };
+    }
+
     const rawItems = collectHighlightCandidates(backendResult.response);
     const highlightItems = [];
     const seen = new Set();
@@ -302,7 +497,11 @@
           "No details available."
       );
 
+      const snippet = normalizeSnippet(item);
+
       const citations = normalizeCitations(item);
+
+      const numbered = buildNumberedSourcesAndSnippets(item, citations);
 
       const type = item?.type || "factual";
       const entailment_score = item?.verification_details?.entailment_score ?? null;
@@ -328,7 +527,10 @@
           neutral_score: neutral_score,
           sources_checked: sources_checked.join(", "),
           citations,
-          note
+          sources: numbered.sources,
+          snippets: numbered.snippets,
+          note,
+          snippet
         });
       }
     }
@@ -339,6 +541,11 @@
       color: backendResult.response.risk_color || "#9CA3AF",
       message: backendResult.response.warning_message || "No warnings detected."
     };
+
+    if (!hasFreshMessages && hasHistoricalAnalysis) {
+      summary.state = "cached";
+      summary.message = "Showing previous analysis for this conversation.";
+    }
 
     return {
       items: highlightItems,
