@@ -22,18 +22,14 @@ class Settings(BaseSettings):
     )
 
 
-    # ── Ollama (Local Embeddings + Models) ────────────────────────────────
-    ollama_base_url: str = Field(
-        default="http://localhost:11434",
-        description="Ollama server base URL",
-    )
+    # ── Embeddings (NVIDIA NIM) ────────────────────────────────
     embedding_model: str = Field(
-        default="nomic-embed-text",
-        description="Ollama embedding model name",
+        default="NV-Embed-QA",
+        description="NVIDIA NIM embedding model name",
     )
     embedding_dimensions: int = Field(
-        default=768,
-        description="Embedding vector dimensions",
+        default=1024,
+        description="Embedding vector dimensions for NV-Embed-QA",
     )
 
 
@@ -61,6 +57,23 @@ class Settings(BaseSettings):
         default=None,
         description="Tavily API key",
     )
+    # Serper (domain-filtered Google search)
+    serper_api_key: Optional[str] = Field(
+        default=None,
+        description="Serper.dev API key for domain-filtered web search",
+    )
+
+    # ── Gemini (Claim Adjudication via Google AI Studio) ──────────────────
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Gemini API key from AI Studio (for claim adjudication)",
+    )
+
+    # ── Google Fact Check Tools API ───────────────────────────────────────
+    google_factcheck_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Fact Check Tools API key from GCP Console",
+    )
 
     # ── NLI Model ─────────────────────────────────────────────────────────
     nli_model_name: str = Field(
@@ -80,7 +93,7 @@ class Settings(BaseSettings):
 
     # ── Pipeline Config ───────────────────────────────────────────────────
     claim_confidence_threshold: float = Field(
-        default=0.3,
+        default=0.1,
         description="Minimum confidence for a claim to be verified",
     )
     web_search_enabled: bool = Field(
@@ -92,13 +105,15 @@ class Settings(BaseSettings):
         description="Maximum number of claims to extract per response",
     )
 
-    # ── Risk Score Weights ────────────────────────────────────────────────
-    weight_source_support: float = 0.30
-    weight_contradiction: float = 0.30
-    weight_source_coverage: float = 0.15
-    weight_claim_importance: float = 0.10
-    weight_source_agreement: float = 0.10
-    weight_evidence_count: float = 0.05
+    # ── Evidence Pipeline Settings ────────────────────────────────────────
+    max_evidence_per_claim: int = Field(
+        default=10,
+        description="Max evidence pieces to send to the LLM adjudicator per claim",
+    )
+    min_evidence_informativeness: float = Field(
+        default=0.3,
+        description="Min max(entailment, contradiction) NLI score to include evidence",
+    )
 
     # ── Server ────────────────────────────────────────────────────────────
     host: str = Field(default="0.0.0.0")
@@ -114,7 +129,6 @@ class Settings(BaseSettings):
         - Groq
         - NVIDIA NIM  
         - OpenRouter 
-        - Ollama 
         """
         return {
 
@@ -172,22 +186,9 @@ class Settings(BaseSettings):
                 "api_key_field": "openrouter_api_key",
                 "description": "NVIDIA Nemotron via OpenRouter free tier",
             },
-            "google/gemini-2.5-flash:free": {
-                "name": "Gemini 2.5 Flash (OpenRouter)",
-                "provider": "openrouter",
-                "tier": 2,
-                "api_key_field": "openrouter_api_key",
-                "description": "Google Gemini via OpenRouter free tier",
-            },
 
-            # ── Ollama ───────────────
-            "llama3.1:8b": {
-                "name": "Llama 3.1 8B (Local)",
-                "provider": "ollama",
-                "tier": 3,
-                "api_key_field": None,
-                "description": "Runs locally via Ollama, no internet needed",
-            },
+
+
         }
 
     model_config = {

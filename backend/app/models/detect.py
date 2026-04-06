@@ -14,19 +14,27 @@ from enum import Enum
 # ── Enums ─────────────────────────────────────────────────────────────────
 
 
-class ClaimType(str, Enum):
-    FACTUAL = "factual"
-    STATISTICAL = "statistical"
-    TEMPORAL = "temporal"
-    CAUSAL = "causal"
-    DEFINITION = "definition"
+class ClaimDomain(str, Enum):
+    """Domain classification for extracted claims."""
+    GENERAL_FACTUAL = "general_factual"
+    SCIENTIFIC_TECHNICAL = "scientific_technical"
+    MEDICAL_HEALTH = "medical_health"
+    NUMERICAL_STATISTICAL = "numerical_statistical"
+    FINANCE_BUSINESS = "finance_business"
+    LEGAL_REGULATORY = "legal_regulatory"
+    NEWS_CURRENT_EVENTS = "news_current_events"
+    HISTORICAL = "historical"
+    CAUSAL_RELATIONAL = "causal_relational"
+    OPINION_SUBJECTIVE = "opinion_subjective"
 
 
 class ClaimStatus(str, Enum):
     VERIFIED = "VERIFIED"
+    PARTIALLY_VERIFIED = "PARTIALLY_VERIFIED"
     UNVERIFIED = "UNVERIFIED"
     CONTRADICTED = "CONTRADICTED"
     UNVERIFIABLE_SOURCE = "UNVERIFIABLE_SOURCE"
+    OPINION = "OPINION"
     SKIPPED = "SKIPPED"
 
 
@@ -41,6 +49,16 @@ class SourceType(str, Enum):
     WEB_SEARCH = "web_search"
     VECTOR_DB = "vector_db"
     CONVERSATION_HISTORY = "conversation_history"
+    DIRECT_API = "direct_api"
+
+
+class SourceTier(str, Enum):
+    """Trust tier for evidence sources."""
+    DIRECT_API = "direct_api"       # Wikipedia, arXiv, PubMed, etc.
+    TAVILY = "tavily"               # Tavily domain-filtered search
+    SERPER = "serper"               # Serper domain-filtered search
+    CONVERSATION = "conversation"   # NER conversation history
+    VECTOR_DB = "vector_db"         # User-uploaded documents
 
 
 class NLILabel(str, Enum):
@@ -183,7 +201,7 @@ class ExtractedClaim(BaseModel):
     text: str = Field(..., description="The claim as a standalone assertion")
     exact_quote: Optional[str] = Field(None, description="Exact substring from the AI response")
     citation_indices: list[int] = Field(default_factory=list, description="Extracted citation indices [1], [2]")
-    type: ClaimType = Field(ClaimType.FACTUAL, description="Claim type classification")
+    domain: ClaimDomain = Field(ClaimDomain.GENERAL_FACTUAL, description="Domain classification for source routing")
     importance: float = Field(0.5, ge=0, le=1, description="How critical this claim is (0-1)")
     suggested_sources: list[SourceType] = Field(
         default_factory=list,
@@ -201,11 +219,16 @@ class ExtractedClaim(BaseModel):
         default_factory=list,
         description="Key entities mentioned in this claim",
     )
+    requires_multi_hop: bool = Field(
+        False,
+        description="Hint that this claim may need multi-hop reasoning over evidence",
+    )
 
 
 class EvidencePiece(BaseModel):
     """A single piece of evidence retrieved from a verification source."""
     source_type: SourceType
+    source_tier: SourceTier = Field(SourceTier.TAVILY, description="Trust tier of this evidence source")
     source_url: Optional[str] = Field(None, description="URL for web sources")
     source_title: Optional[str] = Field(None, description="Title/name of the source")
     document_name: Optional[str] = Field(None, description="Name of user-uploaded document")
@@ -220,10 +243,14 @@ class EvidencePiece(BaseModel):
 
 
 class ClaimVerificationResult(BaseModel):
-    """Full verification result for a single claim."""
+    """Full verification result for a single claim (post-adjudication)."""
     claim: ExtractedClaim
-    risk_score: float = Field(0, ge=0, le=100, description="Claim-level risk score (0-100)")
+    risk_score: float = Field(0, ge=0, le=100, description="Claim-level risk score (0-100) from LLM adjudicator")
     status: ClaimStatus = ClaimStatus.UNVERIFIED
+    confidence: float = Field(0.0, ge=0, le=1, description="Adjudicator's confidence in verdict")
+    reasoning: Optional[str] = Field(None, description="LLM adjudicator reasoning")
+    suggestion: Optional[str] = Field(None, description="What user should manually verify")
+    contradiction_details: Optional[str] = Field(None, description="Details about contradiction if any")
     max_entailment_score: float = 0.0
     max_contradiction_score: float = 0.0
     source_coverage: float = Field(0, description="Fraction of sources that returned evidence")
@@ -248,9 +275,12 @@ class ClaimResultResponse(BaseModel):
     id: str
     text: str
     exact_quote: Optional[str] = Field(None, description="Exact phrase from the original text (for DOM highlighting)")
-    type: ClaimType
+    domain: ClaimDomain = Field(ClaimDomain.GENERAL_FACTUAL, description="Claim domain classification")
     risk_score: float = Field(ge=0, le=100)
     status: ClaimStatus
+    confidence: float = Field(0.0, description="Adjudicator confidence (0-1)")
+    reasoning: Optional[str] = Field(None, description="LLM adjudicator reasoning")
+    suggestion: Optional[str] = Field(None, description="Manual verification suggestion")
     suggested_sources: list[SourceType] = Field(
         default_factory=list,
         description="Sources the LLM suggested checking for this claim",
@@ -270,6 +300,7 @@ class HighlightClaim(BaseModel):
     """A claim formatted for the extension's DOM highlighting system."""
     text: str = Field(..., description="Exact claim text for DOM text matching")
     exact_quote: Optional[str] = Field(None, description="Exact phrase from original AI text")
+    domain: Optional[ClaimDomain] = Field(None, description="Domain classification (e.g. MEDICAL_HEALTH)")
     score: float = Field(..., description="Risk score 0-100")
     note: str = Field("", description="Explanation for tooltip")
     citations: list[str] = Field(default_factory=list, description="Source URLs/names for tooltip")

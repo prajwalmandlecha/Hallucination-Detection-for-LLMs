@@ -50,13 +50,29 @@ class NERResult:
     last_processed_index: int = -1
 
     def get_entities_for_query(self, query_entities: list[str]) -> list[Entity]:
-        """Find conversation entities that match the given query entities."""
+        """Find conversation entities that match the given query entities.
+        
+        Uses exact match + substring match + abbreviation match (fuzzy).
+        """
         query_lower = {e.lower() for e in query_entities}
-        return [
-            e for e in self.entities
-            if e.text.lower() in query_lower
-            or any(q in e.text.lower() for q in query_lower)
-        ]
+        matches = []
+        for e in self.entities:
+            e_lower = e.text.lower()
+            # Exact match
+            if e_lower in query_lower:
+                matches.append(e)
+                continue
+            # Substring match (entity contains query or query contains entity)
+            if any(q in e_lower or e_lower in q for q in query_lower):
+                matches.append(e)
+                continue
+            # Abbreviation match (short text might be abbreviation)
+            if len(e_lower) <= 5:
+                for q in query_lower:
+                    if e_lower in q.split() or q in e_lower.split():
+                        matches.append(e)
+                        break
+        return matches
 
     def get_context_around_entities(
         self,
@@ -119,13 +135,11 @@ class NERExtractor:
             stmt = select(ExtractedEntity).where(ExtractedEntity.conversation_id == conversation_id)
             db_entities = (await session.execute(stmt)).scalars().all()
             
-            # Since we don't strictly have message_index in DB, we'll map them as best effort or rely on incremental
-            # For exact incremental, we'd need to link to Message. Here, if we fetch them, we just load them into result.
             for ent in db_entities:
                 result.entities.append(Entity(
                     text=ent.name,
                     label=ent.label,
-                    message_index=0, # Simplifying since DB doesn't store index, only message_id
+                    message_index=ent.message_index if ent.message_index is not None else 0,
                     role="unknown",
                     db_id=ent.id
                 ))

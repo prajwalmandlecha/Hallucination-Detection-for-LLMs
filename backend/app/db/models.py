@@ -28,7 +28,7 @@ from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from pgvector.sqlalchemy import Vector
 
-from app.models.detect import ClaimType, SourceType
+from app.models.detect import ClaimDomain, SourceType
 
 Base = declarative_base()
 
@@ -117,10 +117,10 @@ class DocumentChunk(Base):
     chunk_index = Column(Integer, nullable=False)
     text_content = Column(Text, nullable=False)
     
-    # Using 768 dimensions for nomic-embed-text (Ollama default)
+    # Using 384 dimensions for all-MiniLM-L6-v2 local sentence transformer
     # NOTE: Do NOT use index=True here — btree can't handle vectors.
     # Use HNSW or IVFFlat index separately for similarity search.
-    embedding = Column(Vector(768))
+    embedding = Column(Vector(384))
 
     document = relationship("Document", back_populates="chunks")
 
@@ -136,6 +136,7 @@ class ExtractedEntity(Base):
     
     # What message it was extracted from
     source_message_id = Column(String(36), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    message_index = Column(Integer, nullable=True)  # Position in conversation (fixes hardcoded 0 bug)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     conversation = relationship("Conversation", back_populates="entities")
@@ -164,10 +165,15 @@ class ClaimAnalysis(Base):
     id = Column(String(36), primary_key=True, default=generate_uuid)
     analysis_id = Column(String(36), ForeignKey("analysis_results.id", ondelete="CASCADE"), nullable=False, index=True)
     claim_text = Column(Text, nullable=False)
-    claim_type = Column(String(50), nullable=False) # mapped from ClaimType enum
+    claim_type = Column(String(50), nullable=False)  # mapped from ClaimDomain enum
+    domain = Column(String(50), nullable=True)  # V2: domain classification
+    exact_quote = Column(Text, nullable=True)  # V2: verbatim phrase for DOM highlighting
     importance_score = Column(Float, nullable=False)
     risk_score = Column(Float, nullable=False)
-    verdict = Column(String(50), nullable=False) # SUPPORTED, CONTRADICTED, UNVERIFIED
+    verdict = Column(String(50), nullable=False)  # VERIFIED, CONTRADICTED, UNVERIFIED, etc.
+    confidence = Column(Float, nullable=True)  # V2: adjudicator confidence 0-1
+    reasoning = Column(Text, nullable=True)  # V2: LLM adjudicator reasoning
+    suggestion = Column(Text, nullable=True)  # V2: manual verification suggestion
 
     analysis = relationship("AnalysisResult", back_populates="claims")
     evidence = relationship("EvidenceItem", back_populates="claim_analysis", cascade="all, delete-orphan")
@@ -177,7 +183,8 @@ class EvidenceItem(Base):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     claim_analysis_id = Column(String(36), ForeignKey("claim_analyses.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_type = Column(String(50), nullable=False) # web_search, vector_db, conversation_history
+    source_type = Column(String(50), nullable=False)  # web_search, vector_db, conversation_history, direct_api
+    source_tier = Column(String(20), nullable=True)  # V2: direct_api, tavily, serper, conversation, vector_db
     source_title = Column(String(500), nullable=True)
     source_url = Column(String(2048), nullable=True)
     snippet = Column(Text, nullable=False)

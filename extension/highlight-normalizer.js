@@ -304,7 +304,7 @@
 
       const citations = normalizeCitations(item);
 
-      const type = item?.type || "factual";
+      const type = item?.domain || item?.type || "factual";
       const entailment_score = item?.verification_details?.entailment_score ?? null;
       const contradiction_score = item?.verification_details?.contradiction_score ?? null;
       const neutral_score = item?.verification_details?.neutral_score ?? null;

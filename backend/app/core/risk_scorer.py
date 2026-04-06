@@ -1,17 +1,20 @@
 """
-Hallucination risk score calculator.
+Hallucination risk score calculator — V2.
 
-Computes per-claim and overall response risk scores using a weighted
-multi-signal aggregation formula.
+The per-claim risk score is now computed by the LLM adjudicator (Gemini 3 Flash).
+This module handles:
+1. Message-level risk aggregation from adjudicated claim scores
+2. Risk level / color / warning message mapping
+3. Contextual warning generation using adjudication reasoning
 """
 
 import logging
 from typing import Optional
 
-from app.config import get_settings
 from app.models.detect import (
     ClaimVerificationResult,
     ClaimStatus,
+    ClaimDomain,
     RiskLevel,
     Warning,
 )
@@ -21,87 +24,83 @@ logger = logging.getLogger(__name__)
 
 class RiskScorer:
     """
-    Calculates hallucination risk scores.
-    
-    Per-claim score formula (0-100):
-        w1 * (1 - max_entailment)        # Source support
-        w2 * max_contradiction            # Direct contradictions
-        w3 * (1 - source_coverage)        # Source coverage
-        w4 * claim_importance             # Claim criticality
-        w5 * source_agreement_variance    # Source disagreement
-        w6 * (1 - evidence_count_norm)    # Evidence quantity
-    
-    Overall score: weighted average by claim importance,
-    with hard floors for critical contradictions and high
-    unverifiable ratios.
+    V2 Risk Scorer — aggregates LLM-adjudicated per-claim risk scores
+    into an overall message risk score.
+
+    The old _compute_claim_risk() weighted formula is replaced by
+    the ClaimAdjudicator. This class now focuses on:
+    - Message-level aggregation with hard floors and ratio penalties
+    - Risk level mapping
+    - Warning generation with adjudication reasoning
     """
-
-    def __init__(self):
-        settings = get_settings()
-        self.w1 = settings.weight_source_support      # 0.30
-        self.w2 = settings.weight_contradiction        # 0.30
-        self.w3 = settings.weight_source_coverage      # 0.15
-        self.w4 = settings.weight_claim_importance     # 0.10
-        self.w5 = settings.weight_source_agreement     # 0.10
-        self.w6 = settings.weight_evidence_count       # 0.05
-
-    def score_claims(
-        self, results: list[ClaimVerificationResult]
-    ) -> list[ClaimVerificationResult]:
-        """
-        Compute risk scores for all verified claims.
-        
-        Modifies results in-place and returns them.
-        """
-        for result in results:
-            if result.status == ClaimStatus.SKIPPED:
-                result.risk_score = 0
-                continue
-            result.risk_score = self._compute_claim_risk(result)
-
-        return results
 
     def compute_overall_risk(
         self, results: list[ClaimVerificationResult]
     ) -> float:
         """
-        Compute the overall response risk score (0-100).
-        
-        Weighted average by claim importance, with hard floors for
-        critical contradictions and high unverifiable ratios.
-        """
-        # Filter to only scored claims (not skipped)
-        scored = [r for r in results if r.status != ClaimStatus.SKIPPED]
+        Aggregate per-claim risk scores into an overall message risk score.
 
-        if not scored:
+        Formula:
+            base_score = importance-weighted average of claim risk_scores
+        
+        Adjustments:
+            - Any high-confidence CONTRADICTED → floor at 65
+            - >50% UNVERIFIED → floor at 55
+            - >30% CONTRADICTED ratio → +15
+            - >60% UNVERIFIED ratio → +10
+            - All VERIFIED → cap at 20
+        """
+        # Filter to scoreable claims (exclude OPINION, SKIPPED)
+        scoreable = [
+            r for r in results
+            if r.status not in (ClaimStatus.SKIPPED, ClaimStatus.OPINION)
+        ]
+
+        if not scoreable:
             return 0.0
 
         # Weighted average by importance
-        total_weight = sum(r.claim.importance for r in scored)
+        total_weight = sum(r.claim.importance for r in scoreable)
         if total_weight == 0:
-            total_weight = len(scored)
-            weighted_sum = sum(r.risk_score for r in scored)
+            total_weight = len(scoreable)
+            weighted_sum = sum(r.risk_score for r in scoreable)
         else:
             weighted_sum = sum(
-                r.risk_score * r.claim.importance for r in scored
+                r.risk_score * r.claim.importance for r in scoreable
             )
 
-        overall = weighted_sum / total_weight
+        base_score = weighted_sum / total_weight
 
-        # Hard floor: any strong contradiction → minimum 70
-        has_critical_contradiction = any(
-            r.max_contradiction_score > 0.9 for r in scored
-        )
-        if has_critical_contradiction:
-            overall = max(overall, 70.0)
+        # Categorize results
+        contradicted = [r for r in scoreable if r.status == ClaimStatus.CONTRADICTED]
+        unverified = [r for r in scoreable if r.status == ClaimStatus.UNVERIFIED]
+        verified = [
+            r for r in scoreable
+            if r.status in (ClaimStatus.VERIFIED, ClaimStatus.PARTIALLY_VERIFIED)
+        ]
 
-        # Boost: many unverifiable claims → minimum 60
-        unverifiable = [r for r in scored if r.status == ClaimStatus.UNVERIFIED]
-        unverifiable_ratio = len(unverifiable) / len(scored)
-        if unverifiable_ratio > 0.5:
-            overall = max(overall, 60.0)
+        c_ratio = len(contradicted) / len(scoreable)
+        u_ratio = len(unverified) / len(scoreable)
 
-        return round(min(overall, 100.0), 1)
+        # Hard floor: any high-confidence contradiction → minimum 65
+        if any(r.confidence > 0.8 and r.status == ClaimStatus.CONTRADICTED for r in scoreable):
+            base_score = max(base_score, 65.0)
+
+        # Hard floor: majority unverified → minimum 55
+        if u_ratio > 0.5:
+            base_score = max(base_score, 55.0)
+
+        # Ratio penalties
+        if c_ratio > 0.3:
+            base_score += 15.0
+        if u_ratio > 0.6:
+            base_score += 10.0
+
+        # All verified cap
+        if len(verified) == len(scoreable) and len(verified) > 0:
+            base_score = min(base_score, 20.0)
+
+        return round(min(max(base_score, 0.0), 100.0), 1)
 
     def get_risk_level(self, score: float) -> RiskLevel:
         """Map a risk score to a risk level."""
@@ -137,7 +136,7 @@ class RiskScorer:
     def generate_warnings(
         self, results: list[ClaimVerificationResult]
     ) -> list[Warning]:
-        """Generate contextual warnings for flagged claims."""
+        """Generate contextual warnings using adjudication reasoning."""
         warnings = []
 
         for result in results:
@@ -152,28 +151,45 @@ class RiskScorer:
                     claim_id=result.claim.id,
                 ))
 
-            # Contradiction detected
+            # Contradiction detected — use adjudicator reasoning
             elif result.status == ClaimStatus.CONTRADICTED:
-                # Find the source that contradicted
+                if result.contradiction_details:
+                    msg = result.contradiction_details[:200]
+                else:
+                    msg = f'Contradicted: "{result.claim.text[:80]}"'
+                # Find the contradicting source
+                source_url = None
                 for ev in result.evidence:
                     if ev.nli_scores and ev.nli_scores.get("contradiction", 0) > 0.7:
-                        source_ref = ev.source_url or ev.source_title or "unknown source"
-                        warnings.append(Warning(
-                            type="contradiction",
-                            message=f'Contradicts information from: {source_ref}',
-                            claim_id=result.claim.id,
-                            source_url=ev.source_url,
-                        ))
-                        break  # One warning per contradicted claim
+                        source_url = ev.source_url
+                        break
+                warnings.append(Warning(
+                    type="contradiction",
+                    message=msg,
+                    claim_id=result.claim.id,
+                    source_url=source_url,
+                ))
 
-            # Statistical claim with low support
+            # Numerical/Statistical claim with low support
             elif (
-                result.claim.type.value == "statistical"
+                result.claim.domain in (
+                    ClaimDomain.NUMERICAL_STATISTICAL,
+                    ClaimDomain.FINANCE_BUSINESS,
+                )
                 and result.max_entailment_score < 0.5
+                and result.status == ClaimStatus.UNVERIFIED
             ):
                 warnings.append(Warning(
                     type="unverified_statistic",
-                    message=f'Statistical claim could not be verified: "{result.claim.text[:100]}"',
+                    message=f'Statistical/financial claim could not be verified: "{result.claim.text[:100]}"',
+                    claim_id=result.claim.id,
+                ))
+
+            # Opinion presented as fact
+            elif result.status == ClaimStatus.OPINION and result.risk_score > 25:
+                warnings.append(Warning(
+                    type="opinion_as_fact",
+                    message=f'Opinion may be presented as fact: "{result.claim.text[:100]}"',
                     claim_id=result.claim.id,
                 ))
 
@@ -186,22 +202,6 @@ class RiskScorer:
                 ))
 
         return warnings
-
-    def _compute_claim_risk(self, result: ClaimVerificationResult) -> float:
-        """Compute the risk score for a single claim (0-100)."""
-        # Normalize evidence count (0 = bad, 5+ = good)
-        evidence_count_norm = min(len(result.evidence) / 5.0, 1.0)
-
-        raw_score = (
-            self.w1 * (1.0 - result.max_entailment_score)
-            + self.w2 * result.max_contradiction_score
-            + self.w3 * (1.0 - result.source_coverage)
-            + self.w4 * result.claim.importance
-            + self.w5 * result.source_agreement_variance
-            + self.w6 * (1.0 - evidence_count_norm)
-        ) * 100.0
-
-        return round(min(max(raw_score, 0.0), 100.0), 1)
 
 
 # ── Module-level singleton ────────────────────────────────────────────────

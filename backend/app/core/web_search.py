@@ -40,11 +40,10 @@ class WebSearcher:
         self.enabled = settings.web_search_enabled
 
         if self.api_key:
-            logger.info("Web search: Tavily configured (1000 free credits)")
+            logger.info("Web search: Tavily configured")
         else:
             logger.warning(
                 "Tavily API key not set — web search disabled. "
-                "Get free key at: https://tavily.com"
             )
 
     @property

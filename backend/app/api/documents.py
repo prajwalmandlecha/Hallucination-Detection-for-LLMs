@@ -42,7 +42,7 @@ async def upload_document(
     - `conversation_id`: Direct internal ID (frontend)
     - `external_conversation_id` + `platform`: External platform ID (extension)
     
-    The document is processed: text extracted → chunked → embedded via Ollama → stored in pgvector.
+    The document is processed: text extracted → chunked → embedded via SentenceTransformers natively → stored in pgvector.
     Returns a document_id to include in /detect requests.
     """
     if not file.filename:

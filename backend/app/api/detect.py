@@ -21,7 +21,7 @@ from app.models.detect import (
     DetectionResponse,
     DetectionMetadata,
     ClaimResultResponse,
-    ClaimType,
+    ClaimDomain,
     ClaimStatus,
     ConversationMessage,
     HighlightClaim,
@@ -56,29 +56,29 @@ def _map_claim_status_from_verdict(verdict: str | None) -> ClaimStatus:
     return ClaimStatus.UNVERIFIED
 
 
-def _map_claim_type(raw_claim_type) -> ClaimType:
-    """Map DB claim type values to ClaimType enum safely."""
-    if isinstance(raw_claim_type, ClaimType):
-        return raw_claim_type
+def _map_claim_domain(raw_claim_domain) -> ClaimDomain:
+    """Map DB claim domain values to ClaimDomain enum safely."""
+    if isinstance(raw_claim_domain, ClaimDomain):
+        return raw_claim_domain
 
-    if raw_claim_type is None:
-        return ClaimType.FACTUAL
+    if raw_claim_domain is None:
+        return ClaimDomain.GENERAL_FACTUAL
 
-    text = str(raw_claim_type).strip()
+    text = str(raw_claim_domain).strip()
     if not text:
-        return ClaimType.FACTUAL
+        return ClaimDomain.GENERAL_FACTUAL
 
-    # Accept enum names (FACTUAL) and enum values (factual)
+    # Accept enum names (GENERAL_FACTUAL) and enum values (general_factual)
     by_name = text.upper()
-    if by_name in ClaimType.__members__:
-        return ClaimType[by_name]
+    if by_name in ClaimDomain.__members__:
+        return ClaimDomain[by_name]
 
     by_value = text.lower()
-    for claim_type in ClaimType:
-        if claim_type.value == by_value:
-            return claim_type
+    for claim_domain in ClaimDomain:
+        if claim_domain.value == by_value:
+            return claim_domain
 
-    return ClaimType.FACTUAL
+    return ClaimDomain.GENERAL_FACTUAL
 
 
 # ── Single-message detection (existing pipeline — used by frontend) ──────
@@ -134,7 +134,6 @@ async def _run_detection_pipeline(
 
     # Risk score aggregation
     scorer = get_risk_scorer()
-    verification_results = scorer.score_claims(verification_results)
     overall_risk = scorer.compute_overall_risk(verification_results)
     risk_level = scorer.get_risk_level(overall_risk)
     risk_color = scorer.get_risk_color(risk_level)
@@ -168,6 +167,7 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
             "evidence": [
                 {
                     "source_type": ev.source_type.value,
+                    "source_tier": ev.source_tier.value if hasattr(ev, "source_tier") and ev.source_tier else None,
                     "source_url": ev.source_url,
                     "source_title": ev.source_title,
                     "document_name": ev.document_name,
@@ -181,11 +181,13 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
             ],
         }
 
-        # Build explanation note
+        # Build explanation note prioritizing adjudicator reasoning
         status_text = result.status.value if hasattr(result.status, 'value') else str(result.status)
         note_parts = [f"Status: {status_text}"]
         
-        if result.status == ClaimStatus.UNVERIFIABLE_SOURCE:
+        if result.reasoning:
+            note_parts.append(result.reasoning)
+        elif result.status == ClaimStatus.UNVERIFIABLE_SOURCE:
             note_parts.append("Source link unreachable (e.g. 403 Forbidden). Could not verify.")
         elif result.max_contradiction_score > 0.3:
             note_parts.append(f"Contradiction detected (score: {result.max_contradiction_score:.2f})")
@@ -206,9 +208,12 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
             id=result.claim.id,
             text=result.claim.text,
             exact_quote=getattr(result.claim, "exact_quote", None),
-            type=result.claim.type,
+            domain=getattr(result.claim, "domain", ClaimDomain.GENERAL_FACTUAL),
             risk_score=result.risk_score,
             status=result.status,
+            confidence=getattr(result, "confidence", 0.0),
+            reasoning=getattr(result, "reasoning", None),
+            suggestion=getattr(result, "suggestion", None),
             suggested_sources=result.claim.suggested_sources,
             note=" | ".join(note_parts),
             citations=citations[:5],
@@ -247,6 +252,7 @@ def _build_claims_response_from_db(analysis_results) -> list[ClaimResultResponse
                 
                 evidences.append({
                     "source_type": ev.source_type,
+                    "source_tier": getattr(ev, "source_tier", None),
                     "source_url": ev.source_url,
                     "source_title": ev.source_title,
                     "document_name": None,
@@ -262,10 +268,12 @@ def _build_claims_response_from_db(analysis_results) -> list[ClaimResultResponse
                 })
             
             note_parts = [f"Status: {status.value}"]
-            if status == ClaimStatus.UNVERIFIABLE_SOURCE:
+            if getattr(claim, "reasoning", None):
+                note_parts.append(claim.reasoning)
+            elif status == ClaimStatus.UNVERIFIABLE_SOURCE:
                 note_parts.append("Source link unreachable.")
             elif status == ClaimStatus.UNVERIFIED:
-                note_parts.append("Could not find strong evidence supporting or contradicting this claim.")
+                note_parts.append("Could not find strong evidence.")
             elif max_contra > 0.3:
                 note_parts.append(f"Contradiction detected (score: {max_contra:.2f})")
             elif max_ent > 0.7:
@@ -282,10 +290,13 @@ def _build_claims_response_from_db(analysis_results) -> list[ClaimResultResponse
             claims_response.append(ClaimResultResponse(
                 id=claim.id,
                 text=claim.claim_text,
-                exact_quote=None,
-                type=_map_claim_type(claim.claim_type),
+                exact_quote=getattr(claim, "exact_quote", None),
+                domain=_map_claim_domain(getattr(claim, "domain", claim.claim_type)),
                 risk_score=claim.risk_score,
                 status=status,
+                confidence=getattr(claim, "confidence", 0.0) or 0.0,
+                reasoning=getattr(claim, "reasoning", None),
+                suggestion=getattr(claim, "suggestion", None),
                 suggested_sources=[],
                 note=" | ".join(note_parts),
                 citations=citations[:5],
@@ -303,9 +314,11 @@ def _build_highlight_claims(verification_results) -> list[HighlightClaim]:
         status_text = result.status.value if hasattr(result.status, 'value') else str(result.status)
         note_parts = [f"Status: {status_text}"]
         
-        if result.max_contradiction_score > 0.3:
+        if hasattr(result, "reasoning") and result.reasoning:
+            note_parts.append(result.reasoning)
+        elif result.max_contradiction_score > 0.3:
             note_parts.append(f"Contradiction detected (score: {result.max_contradiction_score:.2f})")
-        if result.max_entailment_score > 0.7:
+        elif result.max_entailment_score > 0.7:
             note_parts.append(f"Supported by sources (score: {result.max_entailment_score:.2f})")
 
         # Collect citation URLs/names
@@ -321,6 +334,7 @@ def _build_highlight_claims(verification_results) -> list[HighlightClaim]:
         highlight_claims.append(HighlightClaim(
             text=result.claim.text,
             exact_quote=getattr(result.claim, "exact_quote", None),
+            domain=getattr(result.claim, "domain", None),
             score=result.risk_score,
             note=" | ".join(note_parts),
             citations=citations[:5],  # Limit to 5 citations
@@ -537,10 +551,15 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                     ca = ClaimAnalysis(
                         analysis=ar,
                         claim_text=claim_res.claim.text,
-                        claim_type=claim_res.claim.type.value if hasattr(claim_res.claim.type, 'value') else claim_res.claim.type,
-                        importance_score=0.5,
+                        claim_type=claim_res.claim.domain.value if hasattr(claim_res.claim.domain, 'value') else claim_res.claim.domain,
+                        domain=claim_res.claim.domain.value if hasattr(claim_res.claim.domain, 'value') else claim_res.claim.domain,
+                        exact_quote=claim_res.claim.exact_quote,
+                        importance_score=claim_res.claim.importance,
                         risk_score=claim_res.risk_score,
-                        verdict=claim_res.status.value if hasattr(claim_res.status, 'value') else claim_res.status
+                        verdict=claim_res.status.value if hasattr(claim_res.status, 'value') else claim_res.status,
+                        confidence=getattr(claim_res, "confidence", None),
+                        reasoning=getattr(claim_res, "reasoning", None),
+                        suggestion=getattr(claim_res, "suggestion", None),
                     )
                     db.add(ca)
                     
@@ -549,6 +568,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                         db.add(EvidenceItem(
                             claim_analysis=ca,
                             source_type=ev.source_type.value if hasattr(ev.source_type, 'value') else ev.source_type,
+                            source_tier=ev.source_tier.value if hasattr(ev.source_tier, 'value') else ev.source_tier,
                             source_url=ev.source_url,
                             source_title=ev.source_title,
                             snippet=ev.snippet,
@@ -628,7 +648,8 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                 
             db_highlight_claims.append(HighlightClaim(
                 text=claim.claim_text,
-                exact_quote=None,
+                exact_quote=getattr(claim, "exact_quote", None),
+                domain=_map_claim_domain(getattr(claim, "domain", claim.claim_type)),
                 score=claim.risk_score,
                 note=" | ".join(note_parts),
                 citations=citations[:5]

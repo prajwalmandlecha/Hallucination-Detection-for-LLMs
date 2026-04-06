@@ -4,7 +4,6 @@ services:
   # ── PostgreSQL (with pgvector) ──────────────────────────────────────
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: postgres
     environment:
       POSTGRES_USER: detection_admin
       POSTGRES_PASSWORD: detection_pass
@@ -25,7 +24,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: backend
     env_file:
       - ./backend/.env
     ports:
@@ -44,7 +42,7 @@ services:
       # Override DB URLs to use Docker service names
       DATABASE_URL: "postgresql+asyncpg://detection_admin:detection_pass@postgres:5432/ai_detection"
       DATABASE_URL_SYNC: "postgresql://detection_admin:detection_pass@postgres:5432/ai_detection"
-      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      WEB_SEARCH_ENABLED: "True"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

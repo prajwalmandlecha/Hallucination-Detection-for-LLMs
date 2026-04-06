@@ -168,10 +168,9 @@ async def health_check():
                 "enabled": settings.web_search_enabled,
             },
             "llm_providers": {
-                "groq": settings.groq_api_key is not None,
-                "nvidia": settings.nvidia_api_key is not None,
-                "openrouter": settings.openrouter_api_key is not None,
-                "ollama": True,
+                "groq": bool(settings.groq_api_key),
+                "nvidia": bool(settings.nvidia_api_key),
+                "openrouter": bool(settings.openrouter_api_key)
             },
         },
         "supported_models": list(settings.supported_models.keys()),
