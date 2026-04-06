@@ -87,7 +87,7 @@ class Settings(BaseSettings):
 
     # ── Claim Extraction ──────────────────────────────────────────────────
     claim_extraction_model: str = Field(
-        default="llama-3.3-70b-versatile",
+        default="openai/gpt-oss-120b",
         description="Primary model for claim extraction",
     )
 

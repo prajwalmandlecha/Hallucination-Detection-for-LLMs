@@ -83,7 +83,7 @@ EXTRACTION_PROVIDERS = [
         "name": "groq",
         "base_url": "https://api.groq.com/openai/v1",
         "api_key_field": "groq_api_key",
-        "model": "llama-3.3-70b-versatile",
+        "default_model": "llama-3.3-70b-versatile",
         "description": "Groq Llama 3.3 70B — fastest free option (~500 tok/s)",
     },
     {
@@ -97,7 +97,7 @@ EXTRACTION_PROVIDERS = [
         "name": "openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "api_key_field": "openrouter_api_key",
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
         "description": "OpenRouter Llama 3.3 70B — free tier",
     },
 ]
@@ -112,22 +112,54 @@ class ClaimExtractor:
     def __init__(self):
         settings = get_settings()
         self.max_claims = settings.max_claims_per_response
+        requested_model = (settings.claim_extraction_model or "").strip()
+        requested_model_lower = requested_model.lower()
+        prefers_glm = requested_model_lower.startswith("glm") or "glm" in requested_model_lower
+        prefers_groq_openai = requested_model_lower.startswith("openai/gpt-oss") or "gpt-oss-120b" in requested_model_lower
         
         # Find the best available provider (all OpenAI-compatible)
         self.client = None
         self.model_name = None
         self.provider_name = None
 
-        for provider in EXTRACTION_PROVIDERS:
+        provider_candidates = EXTRACTION_PROVIDERS
+        if prefers_glm:
+            # GLM models are typically available through OpenRouter's OpenAI-compatible endpoint.
+            provider_candidates = sorted(
+                EXTRACTION_PROVIDERS,
+                key=lambda provider: 0 if provider["name"] == "openrouter" else 1,
+            )
+        elif prefers_groq_openai:
+            provider_candidates = sorted(
+                EXTRACTION_PROVIDERS,
+                key=lambda provider: 0 if provider["name"] == "groq" else 1,
+            )
+
+        for provider in provider_candidates:
             api_key = getattr(settings, provider["api_key_field"], None)
             if api_key:
                 self.client = AsyncOpenAI(
                     base_url=provider["base_url"],
                     api_key=api_key,
                 )
-                self.model_name = provider["model"]
+                selected_model = requested_model or provider["default_model"]
+
+                # Step 3.5 Flash is configured for NVIDIA NIM in this project.
+                # If NVIDIA is unavailable, fall back to the selected provider default.
+                if requested_model.startswith("stepfun-ai/") and provider["name"] != "nvidia":
+                    logger.warning(
+                        "Requested model '%s' requires NVIDIA NIM; falling back to %s default '%s'.",
+                        requested_model,
+                        provider["name"],
+                        provider["default_model"],
+                    )
+                    selected_model = provider["default_model"]
+
+                self.model_name = selected_model
                 self.provider_name = provider["name"]
-                logger.info(f"Claim extraction: using {provider['description']}")
+                logger.info(
+                    f"Claim extraction: using {provider['description']} ({self.model_name})"
+                )
                 break
 
         # If no OpenAI-compatible provider available
@@ -211,6 +243,13 @@ class ClaimExtractor:
         Works with Groq, NVIDIA NIM, and OpenRouter.
         """
         extra_kwargs = {}
+        request_kwargs = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": CLAIM_EXTRACTION_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        }
         
         # OpenRouter needs extra headers
         if self.provider_name == "openrouter":
@@ -219,18 +258,24 @@ class ClaimExtractor:
                 "X-Title": "AI Hallucination Detector",
             }
 
+        # NVIDIA Qwen settings from NIM chat-completions guidance.
+        if self.provider_name == "nvidia":
+            request_kwargs["temperature"] = 0.60
+            request_kwargs["top_p"] = 0.95
+            request_kwargs["max_tokens"] = 16384
+            extra_kwargs["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": True}
+            }
+        else:
+            request_kwargs["temperature"] = 0.1
+            request_kwargs["max_tokens"] = 4096
+            request_kwargs["response_format"] = {"type": "json_object"}
+
         response = await self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[
-                {"role": "system", "content": CLAIM_EXTRACTION_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.1,
-            max_tokens=4096,
-            response_format={"type": "json_object"},
+            **request_kwargs,
             **extra_kwargs,
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content or ""
 
 
     def _parse_response(self, response_text: str) -> list[ExtractedClaim]:
@@ -238,11 +283,18 @@ class ClaimExtractor:
         import re
         try:
             text = response_text.strip()
-            
-            # Isolate the JSON object from potential markdown wrapping or conversational prefixes
-            match = re.search(r'(\{.*\})', text, re.DOTALL)
-            if match:
-                text = match.group(1)
+
+            # If model returned markdown fenced JSON, extract the fenced payload first.
+            fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+            if fenced_match:
+                text = fenced_match.group(1).strip()
+
+            # Isolate the first JSON object from conversational prefixes/suffixes.
+            if not text.startswith("{"):
+                start = text.find("{")
+                end = text.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    text = text[start:end + 1]
                 
             # Automatically strip trailing commas (common LLM hallucination) before closing brackets
             text = re.sub(r',\s*([}\]])', r'\1', text)
@@ -302,6 +354,11 @@ class ClaimExtractor:
 
     @staticmethod
     def _parse_sources(sources: list) -> list[SourceType]:
+        if isinstance(sources, str):
+            sources = [sources]
+        if not isinstance(sources, list):
+            return []
+
         parsed = []
         for s in sources:
             try:

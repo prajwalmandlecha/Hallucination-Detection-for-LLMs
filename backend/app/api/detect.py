@@ -28,6 +28,7 @@ from app.models.detect import (
     MessageDetectionResult,
     RiskLevel,
     ExtensionSource,
+    SourceType,
 )
 from app.core.claim_extractor import get_claim_extractor
 from app.core.ner_extractor import get_ner_extractor
@@ -79,6 +80,37 @@ def _map_claim_domain(raw_claim_domain) -> ClaimDomain:
             return claim_domain
 
     return ClaimDomain.GENERAL_FACTUAL
+
+
+async def _resolve_extension_document_ids(
+    db: AsyncSession,
+    conversation_id: str | None,
+    requested_document_ids: list[str] | None,
+) -> list[str]:
+    """Merge explicit document IDs with documents already attached to the conversation."""
+    merged_document_ids = []
+    seen = set()
+
+    for document_id in requested_document_ids or []:
+        if document_id and document_id not in seen:
+            seen.add(document_id)
+            merged_document_ids.append(document_id)
+
+    if not conversation_id:
+        return merged_document_ids
+
+    from sqlalchemy import select
+    from app.db.models import Document
+
+    document_query = select(Document.id).where(Document.conversation_id == conversation_id)
+    document_result = await db.execute(document_query)
+
+    for document_id in document_result.scalars().all():
+        if document_id and document_id not in seen:
+            seen.add(document_id)
+            merged_document_ids.append(document_id)
+
+    return merged_document_ids
 
 
 # ── Single-message detection (existing pipeline — used by frontend) ──────
@@ -184,6 +216,9 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
         # Build explanation note prioritizing adjudicator reasoning
         status_text = result.status.value if hasattr(result.status, 'value') else str(result.status)
         note_parts = [f"Status: {status_text}"]
+
+        web_checked = SourceType.WEB_SEARCH in result.sources_checked
+        web_evidence_found = any(ev.source_type == SourceType.WEB_SEARCH for ev in result.evidence)
         
         if result.reasoning:
             note_parts.append(result.reasoning)
@@ -193,6 +228,9 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
             note_parts.append(f"Contradiction detected (score: {result.max_contradiction_score:.2f})")
         elif result.max_entailment_score > 0.7:
             note_parts.append(f"Strongly supported (score: {result.max_entailment_score:.2f})")
+
+        if web_checked and not web_evidence_found:
+            note_parts.append("Web search was attempted but returned no retrievable evidence")
 
         # Collect citation URLs/names
         citations = []
@@ -304,6 +342,65 @@ def _build_claims_response_from_db(analysis_results) -> list[ClaimResultResponse
             ))
             
     return claims_response
+
+
+def _claim_fingerprint(claim: ClaimResultResponse) -> tuple[str, str]:
+    """Stable fingerprint used to dedupe claim entries from live + DB paths."""
+    normalized_text = " ".join((claim.text or "").strip().lower().split())
+    claim_type = claim.type.value if hasattr(claim.type, "value") else str(claim.type)
+    return normalized_text, claim_type
+
+
+def _collect_sources_queried(claims: list[ClaimResultResponse]) -> list[str]:
+    """Collect unique sources that were checked across claim responses."""
+    sources = set()
+
+    for claim in claims:
+        details = claim.verification_details or {}
+        checked = details.get("sources_checked", [])
+        if not isinstance(checked, list):
+            continue
+
+        for source in checked:
+            if source is None:
+                continue
+            value = source.value if hasattr(source, "value") else str(source)
+            if value:
+                sources.add(value)
+
+    return sorted(sources)
+
+
+def _dedupe_warnings(warnings: list) -> list:
+    """Remove duplicate warnings while preserving order."""
+    deduped = []
+    seen = set()
+
+    for warning in warnings:
+        if hasattr(warning, "type"):
+            key = (
+                getattr(warning, "type", None),
+                getattr(warning, "message", None),
+                getattr(warning, "claim_id", None),
+                getattr(warning, "source_url", None),
+            )
+        elif isinstance(warning, dict):
+            key = (
+                warning.get("type"),
+                warning.get("message"),
+                warning.get("claim_id"),
+                warning.get("source_url"),
+            )
+        else:
+            key = (str(warning),)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        deduped.append(warning)
+
+    return deduped
 
 
 def _build_highlight_claims(verification_results) -> list[HighlightClaim]:
@@ -435,7 +532,16 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
     )
     await db.commit()
 
-    logger.info(f"Synced conversation {conv.id}: {new_count} new messages")
+    document_ids = await _resolve_extension_document_ids(
+        db=db,
+        conversation_id=conv.id,
+        requested_document_ids=request.document_ids,
+    )
+
+    logger.info(
+        f"Synced conversation {conv.id}: {new_count} new messages, "
+        f"{len(document_ids)} documents available for verification"
+    )
 
     # ── Step 2: Identify assistant messages to analyze ────────────────
     # Analyze only assistant messages that still do not have an analysis result.
@@ -500,7 +606,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                 model_response=assistant_msg.text,
                 conversation_history=history_messages,
                 conversation_id=conv.id,
-                document_ids=request.document_ids,
+                document_ids=document_ids,
                 config={
                     "check_web": request.config.check_web,
                     "check_documents": request.config.check_documents,
@@ -619,6 +725,8 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
     past_analyses = []
     
     # We must rebuild MessageDetectionResult for past messages so the frontend can map them via external_id
+    seen_message_ids = {m.messageId for m in message_results if m.messageId}
+
     for past_analysis, msg in db_result.all():
         past_analyses.append(past_analysis)
         
@@ -656,23 +764,30 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
             ))
 
         scorer_instance = get_risk_scorer()
-        message_results.append(MessageDetectionResult(
-            messageId=msg.external_id,
-            messageIndex=msg.message_index,
-            assistantRoleIndex=msg.role_index,
-            role="assistant",
-            risk_score=past_analysis.overall_risk_score,
-            risk_level=scorer_instance.get_risk_level(past_analysis.overall_risk_score),
-            claims=db_highlight_claims
-        ))
+        if msg.external_id not in seen_message_ids:
+            message_results.append(MessageDetectionResult(
+                messageId=msg.external_id,
+                messageIndex=msg.message_index,
+                assistantRoleIndex=msg.role_index,
+                role="assistant",
+                risk_score=past_analysis.overall_risk_score,
+                risk_level=scorer_instance.get_risk_level(past_analysis.overall_risk_score),
+                claims=db_highlight_claims
+            ))
+            if msg.external_id:
+                seen_message_ids.add(msg.external_id)
     
     db_claims_response = _build_claims_response_from_db(past_analyses)
     
     # Merge them into the final response array without duplicating!
-    existing_claim_ids = {c.id for c in all_claims_response}
+    existing_claim_fingerprints = {_claim_fingerprint(c) for c in all_claims_response}
     for c in db_claims_response:
-        if c.id not in existing_claim_ids:
+        fp = _claim_fingerprint(c)
+        if fp not in existing_claim_fingerprints:
             all_claims_response.append(c)
+            existing_claim_fingerprints.add(fp)
+
+    all_warnings = _dedupe_warnings(all_warnings)
 
     # Recompute overall_risk based on ALL analysis_results (both newly processed and past DB)
     all_scores = [a.overall_risk_score for a in past_analyses] + total_risk_scores
@@ -704,6 +819,18 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
         f"time={processing_time}ms"
     )
 
+    logger.info(
+        "Extension response payload: response_id=%s platform=%s conversation_id=%s risk=%.1f level=%s claims=%d results=%d warnings=%d",
+        response_id,
+        platform,
+        conv.id,
+        overall_risk,
+        risk_level.value,
+        len(all_claims_response),
+        len(message_results),
+        len(all_warnings),
+    )
+
     return DetectionResponse(
         response_id=response_id,
         overall_risk_score=overall_risk,
@@ -718,7 +845,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
             claims_extracted=len(all_claims_response),
             claims_verified=claims_verified,
             claims_skipped=claims_skipped,
-            sources_queried=[],
+            sources_queried=_collect_sources_queried(all_claims_response),
             platform=platform,
             conversation_id=conv.id,
         ),

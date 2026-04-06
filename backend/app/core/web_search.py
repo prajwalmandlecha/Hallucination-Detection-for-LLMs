@@ -39,6 +39,15 @@ class WebSearcher:
         self.api_key = settings.tavily_api_key
         self.enabled = settings.web_search_enabled
 
+        # Persistent HTTP connection pool — avoids opening a new TCP connection
+        # for every Tavily query (which was causing rate-limit spikes and latency
+        # when many claims were verified in parallel).
+        self._http = httpx.AsyncClient(
+            timeout=20.0,
+            verify=False,  # also needed for direct URL fetches of citation links
+            headers={"User-Agent": "Mozilla/5.0 AI-Verifier/1.0"},
+        )
+
         if self.api_key:
             logger.info("Web search: Tavily configured")
         else:
@@ -78,20 +87,18 @@ class WebSearcher:
 
         for query in queries[:2]:  # Limit to 2 queries per claim for speed
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        "https://api.tavily.com/search",
-                        json={
-                            "api_key": self.api_key,
-                            "query": query,
-                            "search_depth": "basic",
-                            "max_results": max_results,
-                            "include_raw_content": False,
-                        },
-                        timeout=15.0,
-                    )
-                    response.raise_for_status()
-                    data = response.json()
+                response = await self._http.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": self.api_key,
+                        "query": query,
+                        "search_depth": "basic",
+                        "max_results": max_results,
+                        "include_raw_content": False,
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
 
                 for result in data.get("results", []):
                     url = result.get("url", "")
@@ -118,30 +125,25 @@ class WebSearcher:
         """Directly fetch a URL using HTTPX and strip HTML tags."""
         import re
         try:
-            async with httpx.AsyncClient(verify=False) as client:
-                response = await client.get(
-                    url, 
-                    timeout=10.0, 
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Verifier/1.0"}
-                )
-                response.raise_for_status()
-                text = response.text
-                
-                # Rudimentary HTML strip
-                clean_text = re.sub(r'<style.*?>.*?</style>', '', text, flags=re.IGNORECASE|re.DOTALL)
-                clean_text = re.sub(r'<script.*?>.*?</script>', '', clean_text, flags=re.IGNORECASE|re.DOTALL)
-                clean_text = re.sub(r'<[^>]+>', ' ', clean_text).strip()
-                clean_text = re.sub(r'\s+', ' ', clean_text)
-                
-                if len(clean_text) < 50:
-                    return None
-                    
-                return EvidencePiece(
-                    source_type=SourceType.WEB_SEARCH,
-                    source_url=url,
-                    source_title=url.split("//")[-1].split("/")[0],
-                    snippet=clean_text[:5000],  # Keep first 5000 chars for NLI
-                )
+            response = await self._http.get(url)
+            response.raise_for_status()
+            text = response.text
+
+            # Rudimentary HTML strip
+            clean_text = re.sub(r'<style.*?>.*?</style>', '', text, flags=re.IGNORECASE|re.DOTALL)
+            clean_text = re.sub(r'<script.*?>.*?</script>', '', clean_text, flags=re.IGNORECASE|re.DOTALL)
+            clean_text = re.sub(r'<[^>]+>', ' ', clean_text).strip()
+            clean_text = re.sub(r'\s+', ' ', clean_text)
+
+            if len(clean_text) < 50:
+                return None
+
+            return EvidencePiece(
+                source_type=SourceType.WEB_SEARCH,
+                source_url=url,
+                source_title=url.split("//")[-1].split("/")[0],
+                snippet=clean_text[:5000],  # Keep first 5000 chars for NLI
+            )
         except Exception as e:
             logger.warning(f"Direct URL fetch failed for {url}: {e}")
             return None

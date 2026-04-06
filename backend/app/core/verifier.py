@@ -296,7 +296,9 @@ class ClaimVerifier:
         """
         tasks = []
         source_keys = []
-        sources_checked = []
+        # NOTE: sources_checked is built *after* asyncio.gather so it only
+        # contains sources whose tasks resolved without raising an exception.
+        # Do NOT append to it here during task scheduling.
 
         # 1. Domain-routed sources (APIs + filtered Tavily/Serper)
         tasks.append(self.domain_router.gather_evidence(claim))
@@ -333,16 +335,20 @@ class ClaimVerifier:
                 source_keys.append("direct_citation")
 
         if not tasks:
-            return [], sources_checked
+            return [], []
 
         # Run all source checks in parallel
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_evidence = []
-        for result in results:
+        sources_checked = []
+        for key, result in zip(source_keys, results):
             if isinstance(result, Exception):
-                logger.error(f"Source check failed: {result}")
+                # Don't add key to sources_checked: it threw, so it never ran properly.
+                logger.error(f"Source check failed for {key.value}: {result}")
                 continue
+            # Mark this source as checked only after it resolved (even if empty)
+            sources_checked.append(key)
             if isinstance(result, list):
                 all_evidence.extend(result)
             elif result is not None:
