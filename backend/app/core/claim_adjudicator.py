@@ -66,7 +66,7 @@ class ClaimAdjudicator:
         try:
             from google import genai
             self.client = genai.Client(api_key=settings.gemini_api_key)
-            self.model = "gemini-3-flash-preview"
+            self.model = "gemma-4-31b-it"
             logger.info("ClaimAdjudicator initialized with Gemini 3 Flash")
         except Exception as e:
             logger.error(f"Failed to initialize Gemini client: {e}")

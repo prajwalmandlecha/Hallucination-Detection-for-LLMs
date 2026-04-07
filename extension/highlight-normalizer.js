@@ -506,6 +506,7 @@
       const contradiction_score = item?.verification_details?.contradiction_score ?? null;
       const neutral_score = item?.verification_details?.neutral_score ?? null;
       const sources_checked = item?.verification_details?.sources_checked || [];
+      const numbered = buildNumberedSourcesAndSnippets(item, citations);
 
       for (const assistantRoleIndex of targetIndices) {
         const dedupeKey = `${assistantRoleIndex}::${statement.toLowerCase()}`;

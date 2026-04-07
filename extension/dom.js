@@ -1,5 +1,4 @@
 (() => {
-	const ROOT_ATTR = "data-hd-root";
 	const HIGHLIGHT_CLASS = "hd-highlight";
 	const TOOLTIP_ID = "hd-tooltip";
 	const STYLE_ID = "hd-highlight-style";
@@ -45,7 +44,10 @@
 	function removeTooltip() {
 		const tooltip = document.getElementById(TOOLTIP_ID);
 		if (tooltip) {
-			tooltip.remove();
+			tooltip.style.display = "none";
+			tooltip.innerHTML = "";
+			tooltip.style.left = "-9999px";
+			tooltip.style.top = "-9999px";
 		}
 	}
 
@@ -90,16 +92,24 @@
 			#${TOOLTIP_ID} {
 				position: fixed;
 				z-index: 2147483647;
-				max-width: 360px;
-				padding: 10px 12px;
-				border-radius: 8px;
+				width: 420px;
+				max-width: calc(100vw - 24px);
+				max-height: calc(100vh - 24px);
+				padding: 12px 14px;
+				border-radius: 10px;
 				background: #111827;
 				color: #f9fafb;
 				box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
 				border: 1px solid rgba(255, 255, 255, 0.12);
 				font-size: 12px;
 				line-height: 1.4;
-				pointer-events: none;
+				pointer-events: auto;
+				overflow-y: auto;
+				overflow-x: hidden;
+				box-sizing: border-box;
+				white-space: normal;
+				word-break: break-word;
+				overflow-wrap: anywhere;
 			}
 
 			#${TOOLTIP_ID} .hd-row {
@@ -109,6 +119,35 @@
 			#${TOOLTIP_ID} .hd-label {
 				color: #93c5fd;
 				font-weight: 600;
+			}
+
+			#${TOOLTIP_ID} .hd-snippet-block {
+				margin-top: 8px;
+				padding-top: 6px;
+				border-top: 1px solid rgba(255,255,255,0.1);
+			}
+
+			#${TOOLTIP_ID} .hd-snippet-item {
+				margin: 6px 0;
+				padding: 6px 8px;
+				background: rgba(255,255,255,0.06);
+				border-radius: 6px;
+				border-left: 3px solid #60a5fa;
+				font-size: 11px;
+				line-height: 1.45;
+				color: #d1d5db;
+			}
+
+			#${TOOLTIP_ID} .hd-snippet-source {
+				font-size: 10px;
+				color: #93c5fd;
+				font-weight: 600;
+				margin-bottom: 2px;
+			}
+
+			#${TOOLTIP_ID} .hd-snippet-text {
+				color: #e5e7eb;
+				font-style: italic;
 			}
 
 			#hd-toggle-btn {
@@ -148,17 +187,22 @@
 				background: rgba(17, 24, 39, 0.95);
 				backdrop-filter: blur(8px);
 				color: white;
-				padding: 12px 20px;
-				border-radius: 8px;
+				padding: 14px 20px;
+				border-radius: 10px;
 				box-shadow: 0 10px 40px rgba(0,0,0,0.5);
 				z-index: 2147483647;
 				display: none;
 				flex-direction: column;
 				gap: 4px;
-				min-width: 320px;
+				min-width: 340px;
 				border: 1px solid rgba(255,255,255,0.1);
-				transition: opacity 0.3s, transform 0.3s;
-				pointer-events: none;
+				transition: opacity 0.35s ease, transform 0.35s ease;
+				pointer-events: auto;
+			}
+			#hd-summary-banner .hd-banner-header {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
 			}
 			#hd-summary-banner .hd-banner-score {
 				font-size: 16px;
@@ -169,9 +213,58 @@
 				font-size: 13px;
 				color: #d1d5db;
 			}
+			#hd-summary-banner .hd-banner-close {
+				background: none;
+				border: none;
+				color: #9ca3af;
+				font-size: 18px;
+				cursor: pointer;
+				padding: 0 2px;
+				line-height: 1;
+				transition: color 0.2s;
+			}
+			#hd-summary-banner .hd-banner-close:hover {
+				color: #f9fafb;
+			}
 			body.hd-hidden #hd-summary-banner {
 				opacity: 0;
 				transform: translate(-50%, -20px);
+				pointer-events: none;
+			}
+
+			/* Loading spinner banner */
+			#hd-summary-banner.hd-loading {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+				flex-direction: row;
+				min-width: 300px;
+			}
+
+			@keyframes hd-spin {
+				0% { transform: rotate(0deg); }
+				100% { transform: rotate(360deg); }
+			}
+
+			.hd-spinner {
+				width: 22px;
+				height: 22px;
+				border: 3px solid rgba(255,255,255,0.15);
+				border-top-color: #60a5fa;
+				border-radius: 50%;
+				animation: hd-spin 0.8s linear infinite;
+				flex-shrink: 0;
+			}
+
+			.hd-loading-text {
+				font-size: 13px;
+				color: #d1d5db;
+				flex: 1;
+			}
+
+			/* Error state */
+			#hd-summary-banner.hd-error {
+				border-color: rgba(239, 68, 68, 0.4);
 			}
 		`;
 
@@ -204,17 +297,48 @@
 
 	// Binds delegated hover handlers once for all highlight marks.
 	function bindTooltipEvents() {
-		if (document.body.getAttribute(ROOT_ATTR) === "bound") {
+		if (window.__hdTooltipEventsBound) {
 			return;
 		}
 
 		const tooltip = ensureTooltip();
+		let hideTimer = null;
+
+		function clearHideTimer() {
+			if (hideTimer) {
+				window.clearTimeout(hideTimer);
+				hideTimer = null;
+			}
+		}
+
+		function hideTooltip() {
+			clearHideTimer();
+			tooltip.style.display = "none";
+		}
+
+		function scheduleHideTooltip() {
+			clearHideTimer();
+			hideTimer = window.setTimeout(() => {
+				hideTimer = null;
+				tooltip.style.display = "none";
+			}, 120);
+		}
+
+		tooltip.addEventListener("mouseenter", () => {
+			clearHideTimer();
+		});
+
+		tooltip.addEventListener("mouseleave", () => {
+			scheduleHideTooltip();
+		});
 
 		document.addEventListener("mouseover", (event) => {
 			const target = event.target instanceof Element ? event.target.closest(`.${HIGHLIGHT_CLASS}`) : null;
 			if (!target) {
 				return;
 			}
+
+			clearHideTimer();
 
 			const score = target.getAttribute("data-hd-score") || "N/A";
 			const status = target.getAttribute("data-hd-status") || "UNKNOWN";
@@ -225,6 +349,8 @@
 			const sourcesChecked = target.getAttribute("data-hd-src") || "N/A";
 			const citations = target.getAttribute("data-hd-citations") || "N/A";
 			const note = target.getAttribute("data-hd-note") || "No details available.";
+			const snippetsJson = target.getAttribute("data-hd-snippets") || "[]";
+			const sourcesJson = target.getAttribute("data-hd-sources") || "[]";
 
 			let statusColor = "#f9fafb";
 			if (status === "CONTRADICTED") statusColor = "#ef4444";
@@ -238,6 +364,34 @@
 			if (contradiction && contradiction !== "null") extraHtml += `<div class="hd-row" style="display:flex; justify-content:space-between;"><span class="hd-label">Contradiction:</span> <span>${parseFloat(contradiction).toFixed(3)}</span></div>`;
 			if (neutral && neutral !== "null") extraHtml += `<div class="hd-row" style="display:flex; justify-content:space-between;"><span class="hd-label">Neutral:</span> <span>${parseFloat(neutral).toFixed(3)}</span></div>`;
 
+			// Build source snippets section
+			let snippetsHtml = "";
+			try {
+				const snippets = JSON.parse(snippetsJson);
+				const sources = JSON.parse(sourcesJson);
+				if (Array.isArray(snippets) && snippets.length > 0) {
+					snippetsHtml = `<div class="hd-snippet-block"><div class="hd-label" style="margin-bottom: 4px;">📋 Source Evidence:</div>`;
+					for (const snip of snippets) {
+						const sourceLabel = snip.sourceNumber && sources[snip.sourceNumber - 1]
+							? `[${snip.sourceNumber}] ${sources[snip.sourceNumber - 1]}`
+							: (snip.sourceNumber ? `[Source ${snip.sourceNumber}]` : "");
+						snippetsHtml += `<div class="hd-snippet-item">`;
+						if (sourceLabel) {
+							snippetsHtml += `<div class="hd-snippet-source">${sourceLabel}</div>`;
+						}
+						snippetsHtml += `<div class="hd-snippet-text">"${snip.text}"</div></div>`;
+					}
+					snippetsHtml += `</div>`;
+				} else if (Array.isArray(sources) && sources.length > 0) {
+					// Show sources list even without snippets
+					snippetsHtml = `<div class="hd-snippet-block"><div class="hd-label" style="margin-bottom: 4px;">📋 Sources Checked:</div>`;
+					sources.forEach((src, i) => {
+						snippetsHtml += `<div class="hd-snippet-item"><div class="hd-snippet-source">[${i + 1}] ${src}</div></div>`;
+					});
+					snippetsHtml += `</div>`;
+				}
+			} catch { /* noop */ }
+
 			tooltip.innerHTML = `
 				<div class="hd-row" style="margin-bottom: 8px; font-size: 14px; font-weight: bold; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 6px;">
 					<span style="color: ${statusColor}">${status}</span>
@@ -247,19 +401,13 @@
 				<div class="hd-row" style="margin-top:6px;"><span class="hd-label">Sources:</span> ${sourcesChecked}</div>
 				<div class="hd-row" style="margin-top:2px;"><span class="hd-label">Citations:</span> ${citations}</div>
 				<div class="hd-row" style="margin-top:4px;"><span class="hd-label">Note:</span> ${note}</div>
+				${snippetsHtml}
 			`;
 			tooltip.style.display = "block";
 
 			if (event instanceof MouseEvent) {
 				setTooltipPosition(tooltip, event.clientX, event.clientY);
 			}
-		}, true);
-
-		document.addEventListener("mousemove", (event) => {
-			if (tooltip.style.display !== "block") {
-				return;
-			}
-			setTooltipPosition(tooltip, event.clientX, event.clientY);
 		}, true);
 
 		document.addEventListener("mouseout", (event) => {
@@ -273,10 +421,14 @@
 				return;
 			}
 
-			tooltip.style.display = "none";
+			if (event.relatedTarget instanceof Node && tooltip.contains(event.relatedTarget)) {
+				return;
+			}
+
+			scheduleHideTooltip();
 		}, true);
 
-		document.body.setAttribute(ROOT_ATTR, "bound");
+		window.__hdTooltipEventsBound = true;
 	}
 
 	// Returns assistant message containers in DOM order, supporting ChatGPT, Gemini, Claude, DeepSeek, and Copilot.
@@ -418,6 +570,10 @@
 
 		if (!matches.length) return 0;
 
+		// Serialize snippets + sources as JSON for tooltip
+		const snippetsStr = JSON.stringify(Array.isArray(statementMeta.snippets) ? statementMeta.snippets : []);
+		const sourcesStr = JSON.stringify(Array.isArray(statementMeta.sources) ? statementMeta.sources : []);
+
 		// Process matches in reverse so we don't invalidate previous splits
 		for (let i = matches.length - 1; i >= 0; i--) {
 			const { start, end } = matches[i];
@@ -447,6 +603,8 @@
 				mark.setAttribute("data-hd-src", String(statementMeta.sources_checked || ""));
 				mark.setAttribute("data-hd-citations", Array.isArray(statementMeta.citations) ? statementMeta.citations.filter(Boolean).join(", ") : "N/A");
 				mark.setAttribute("data-hd-note", statementMeta.note || "No details available.");
+				mark.setAttribute("data-hd-snippets", snippetsStr);
+				mark.setAttribute("data-hd-sources", sourcesStr);
 
 				middleNode.parentNode.replaceChild(mark, middleNode);
 			}
@@ -473,6 +631,20 @@
 		});
 	}
 
+	// Dismisses the summary banner
+	function dismissSummaryBanner() {
+		const banner = document.getElementById("hd-summary-banner");
+		if (banner) {
+			banner.style.opacity = "0";
+			banner.style.transform = "translate(-50%, -20px)";
+			setTimeout(() => {
+				banner.style.display = "none";
+				banner.style.opacity = "";
+				banner.style.transform = "";
+			}, 350);
+		}
+	}
+
 	// Injects and updates the top visual summary banner
 	function ensureSummaryBanner(summary) {
 		let banner = document.getElementById("hd-summary-banner");
@@ -482,18 +654,134 @@
 			document.body.appendChild(banner);
 		}
 
+		// Clear loading/error classes
+		banner.classList.remove("hd-loading", "hd-error");
+
 		if (!summary) {
 			banner.style.display = "none";
 			return;
 		}
 
 		banner.style.display = "flex";
+		banner.style.flexDirection = "column";
 		banner.innerHTML = `
-			<div class="hd-banner-score" style="color: ${summary.color};">
-				Overall Risk: ${summary.score > 0 ? Number(summary.score).toFixed(1) : "N/A"} (${summary.level})
+			<div class="hd-banner-header">
+				<div class="hd-banner-score" style="color: ${summary.color};">
+					Overall Risk: ${summary.score > 0 ? Number(summary.score).toFixed(1) : "N/A"} (${summary.level})
+				</div>
+				<button class="hd-banner-close" title="Dismiss">✕</button>
 			</div>
 			<div class="hd-banner-msg">${summary.message}</div>
 		`;
+
+		// Bind close button
+		const closeBtn = banner.querySelector(".hd-banner-close");
+		if (closeBtn) {
+			closeBtn.addEventListener("click", (e) => {
+				e.stopPropagation();
+				dismissSummaryBanner();
+			});
+		}
+
+		// Auto-dismiss after 8 seconds
+		clearTimeout(banner._hdAutoDismiss);
+		banner._hdAutoDismiss = setTimeout(() => {
+			dismissSummaryBanner();
+		}, 8000);
+	}
+
+	// Shows a loading state banner with spinner
+	function showLoadingBanner(message) {
+		ensureStyles();
+
+		let banner = document.getElementById("hd-summary-banner");
+		if (!banner) {
+			banner = document.createElement("div");
+			banner.id = "hd-summary-banner";
+			document.body.appendChild(banner);
+		}
+
+		banner.classList.remove("hd-error");
+		banner.classList.add("hd-loading");
+		banner.style.display = "flex";
+		banner.style.flexDirection = "row";
+		banner.innerHTML = `
+			<div class="hd-spinner"></div>
+			<div class="hd-loading-text">${message || "Analyzing conversation..."}</div>
+			<button class="hd-banner-close" title="Dismiss" style="margin-left: auto; flex-shrink: 0;">✕</button>
+		`;
+
+		const closeBtn = banner.querySelector(".hd-banner-close");
+		if (closeBtn) {
+			closeBtn.addEventListener("click", (e) => {
+				e.stopPropagation();
+				dismissSummaryBanner();
+			});
+		}
+	}
+
+	// Shows an error state banner
+	function showErrorBanner(message) {
+		ensureStyles();
+
+		let banner = document.getElementById("hd-summary-banner");
+		if (!banner) {
+			banner = document.createElement("div");
+			banner.id = "hd-summary-banner";
+			document.body.appendChild(banner);
+		}
+
+		banner.classList.remove("hd-loading");
+		banner.classList.add("hd-error");
+		banner.style.display = "flex";
+		banner.style.flexDirection = "column";
+		banner.innerHTML = `
+			<div class="hd-banner-header">
+				<div class="hd-banner-score" style="color: #ef4444;">
+					⚠️ Detection Failed
+				</div>
+				<button class="hd-banner-close" title="Dismiss">✕</button>
+			</div>
+			<div class="hd-banner-msg">${message || "Something went wrong."}</div>
+		`;
+
+		const closeBtn = banner.querySelector(".hd-banner-close");
+		if (closeBtn) {
+			closeBtn.addEventListener("click", (e) => {
+				e.stopPropagation();
+				dismissSummaryBanner();
+			});
+		}
+
+		// Auto-dismiss errors after 6 seconds
+		clearTimeout(banner._hdAutoDismiss);
+		banner._hdAutoDismiss = setTimeout(() => {
+			dismissSummaryBanner();
+		}, 6000);
+	}
+
+	// Sets the detection state (loading, error, idle) — called from background.js
+	function setDetectionState(statePayload) {
+		if (!statePayload || typeof statePayload !== "object") {
+			return { ok: false, reason: "Invalid state payload." };
+		}
+
+		const state = statePayload.state || "idle";
+		const message = statePayload.message || "";
+
+		if (state === "loading") {
+			showLoadingBanner(message);
+			return { ok: true, state: "loading" };
+		}
+
+		if (state === "error") {
+			showErrorBanner(message);
+			return { ok: true, state: "error" };
+		}
+
+		// idle or unknown — dismiss any existing banner
+		dismissSummaryBanner();
+		return { ok: true, state: "idle" };
 	}
 
 	function applyMessageBadges(messageResults, assistantNodes) {
@@ -531,6 +819,33 @@
 		});
 	}
 
+	// Auto-close overlay on URL/navigation changes (SPA chat switches)
+	function setupNavigationWatcher() {
+		if (window._hdNavWatcherBound) return;
+		window._hdNavWatcherBound = true;
+
+		let lastUrl = location.href;
+
+		// Poll for URL changes (covers SPA pushState/replaceState)
+		setInterval(() => {
+			if (location.href !== lastUrl) {
+				lastUrl = location.href;
+				dismissSummaryBanner();
+				removeExistingHighlights();
+				removeTooltip();
+				document.querySelectorAll('.hd-message-badge').forEach(b => b.remove());
+			}
+		}, 500);
+
+		// Also listen for popstate
+		window.addEventListener("popstate", () => {
+			dismissSummaryBanner();
+			removeExistingHighlights();
+			removeTooltip();
+			document.querySelectorAll('.hd-message-badge').forEach(b => b.remove());
+		});
+	}
+
 	// The primary entry point for painting highlights into the DOM
 	function applyHighlights(payload) {
 		if (!payload || typeof payload !== "object") {
@@ -545,6 +860,7 @@
 		ensureToggleButton(); // Make sure the toggle button is in the DOM
 		ensureSummaryBanner(summary);
 		bindTooltipEvents();
+		setupNavigationWatcher();
 
 		const assistantNodes = getAssistantMessageNodes();
 		applyMessageBadges(payload.message_results, assistantNodes);
@@ -612,4 +928,5 @@
 	}
 
 	window.__hdApplyHighlights = applyHighlights;
+	window.__hdSetDetectionState = setDetectionState;
 })();

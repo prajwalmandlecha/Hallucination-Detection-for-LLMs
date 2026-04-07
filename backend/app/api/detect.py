@@ -81,6 +81,36 @@ def _map_claim_domain(raw_claim_domain) -> ClaimDomain:
     return ClaimDomain.GENERAL_FACTUAL
 
 
+def _normalize_claim_text_for_key(value: str | None) -> str:
+    return " ".join((value or "").split()).strip().lower()
+
+
+def _build_claim_response_dedupe_key(claim_response: ClaimResultResponse) -> str:
+    domain_value = (
+        claim_response.domain.value
+        if hasattr(claim_response.domain, "value")
+        else str(claim_response.domain or "")
+    )
+    text_value = _normalize_claim_text_for_key(
+        claim_response.exact_quote or claim_response.text
+    )
+    return f"{domain_value}::{text_value}"
+
+
+def _build_message_result_key(
+    message_id: str | None,
+    message_index: int | None,
+    assistant_role_index: int | None,
+) -> str | None:
+    if message_id:
+        return f"id:{message_id}"
+    if assistant_role_index is not None:
+        return f"assistant_role_index:{assistant_role_index}"
+    if message_index is not None:
+        return f"message_index:{message_index}"
+    return None
+
+
 # ── Single-message detection (existing pipeline — used by frontend) ──────
 
 async def _run_detection_pipeline(
@@ -480,7 +510,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
     all_claims_response = []
     all_warnings = []
     message_results = []
-    total_risk_scores = []
+    seen_message_result_keys: set[str] = set()
 
     for assistant_msg in assistant_messages:
         # Build conversation history up to this message
@@ -514,9 +544,8 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
             highlights = _build_highlight_claims(pipeline_result["verification_results"])
             all_claims_response.extend(claims)
             all_warnings.extend(pipeline_result["warnings"])
-            total_risk_scores.append(pipeline_result["overall_risk"])
 
-            message_results.append(MessageDetectionResult(
+            message_result = MessageDetectionResult(
                 messageId=assistant_msg.id,
                 messageIndex=assistant_msg.index,
                 assistantRoleIndex=assistant_msg.roleIndex,
@@ -524,7 +553,16 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                 risk_score=pipeline_result["overall_risk"],
                 risk_level=pipeline_result["risk_level"],
                 claims=highlights,
-            ))
+            )
+            message_result_key = _build_message_result_key(
+                message_result.messageId,
+                message_result.messageIndex,
+                message_result.assistantRoleIndex,
+            )
+            if message_result_key is None or message_result_key not in seen_message_result_keys:
+                if message_result_key is not None:
+                    seen_message_result_keys.add(message_result_key)
+                message_results.append(message_result)
 
             # ── DB Persistence ────────────────────────────────────────────────
             from app.db.models import AnalysisResult, ClaimAnalysis, EvidenceItem, Message
@@ -589,7 +627,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
         except Exception as e:
             logger.error(f"Detection failed for message {assistant_msg.id}: {e}", exc_info=True)
             # Still add an empty result so highlighting doesn't break
-            message_results.append(MessageDetectionResult(
+            message_result = MessageDetectionResult(
                 messageId=assistant_msg.id,
                 messageIndex=assistant_msg.index,
                 assistantRoleIndex=assistant_msg.roleIndex,
@@ -597,7 +635,16 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                 risk_score=0.0,
                 risk_level=RiskLevel.LOW,
                 claims=[],
-            ))
+            )
+            message_result_key = _build_message_result_key(
+                message_result.messageId,
+                message_result.messageIndex,
+                message_result.assistantRoleIndex,
+            )
+            if message_result_key is None or message_result_key not in seen_message_result_keys:
+                if message_result_key is not None:
+                    seen_message_result_keys.add(message_result_key)
+                message_results.append(message_result)
 
     # ── Step 4: Add PAST claims from DB ──────────────────────────────
     from app.db.models import AnalysisResult, Message, ClaimAnalysis
@@ -656,7 +703,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
             ))
 
         scorer_instance = get_risk_scorer()
-        message_results.append(MessageDetectionResult(
+        message_result = MessageDetectionResult(
             messageId=msg.external_id,
             messageIndex=msg.message_index,
             assistantRoleIndex=msg.role_index,
@@ -664,18 +711,32 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
             risk_score=past_analysis.overall_risk_score,
             risk_level=scorer_instance.get_risk_level(past_analysis.overall_risk_score),
             claims=db_highlight_claims
-        ))
+        )
+        message_result_key = _build_message_result_key(
+            message_result.messageId,
+            message_result.messageIndex,
+            message_result.assistantRoleIndex,
+        )
+        if message_result_key is None or message_result_key not in seen_message_result_keys:
+            if message_result_key is not None:
+                seen_message_result_keys.add(message_result_key)
+            message_results.append(message_result)
     
     db_claims_response = _build_claims_response_from_db(past_analyses)
     
     # Merge them into the final response array without duplicating!
-    existing_claim_ids = {c.id for c in all_claims_response}
+    existing_claim_keys = {
+        _build_claim_response_dedupe_key(c) for c in all_claims_response
+    }
     for c in db_claims_response:
-        if c.id not in existing_claim_ids:
-            all_claims_response.append(c)
+        dedupe_key = _build_claim_response_dedupe_key(c)
+        if dedupe_key in existing_claim_keys:
+            continue
+        existing_claim_keys.add(dedupe_key)
+        all_claims_response.append(c)
 
-    # Recompute overall_risk based on ALL analysis_results (both newly processed and past DB)
-    all_scores = [a.overall_risk_score for a in past_analyses] + total_risk_scores
+    # Recompute overall_risk from deduped per-message results.
+    all_scores = [float(result.risk_score) for result in message_results]
     overall_risk = sum(all_scores) / len(all_scores) if all_scores else 0.0
     
     scorer = get_risk_scorer()

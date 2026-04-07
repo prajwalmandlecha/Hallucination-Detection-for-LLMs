@@ -750,6 +750,72 @@ async function applyHighlightsInTab(tabId, highlightItems) {
   return result;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Keeps the MV3 service worker alive while long-running detection is in flight.
+function startServiceWorkerKeepAlive() {
+  const timerId = setInterval(() => {
+    try {
+      chrome.runtime.getPlatformInfo(() => {
+        // Read lastError to avoid unchecked runtime warnings.
+        void chrome.runtime.lastError;
+      });
+    } catch {
+      // no-op
+    }
+  }, 20000);
+
+  return () => {
+    clearInterval(timerId);
+  };
+}
+
+async function applyHighlightsInTabWithRetry(tabId, highlightPayload) {
+  const hasItems = Array.isArray(highlightPayload?.items) && highlightPayload.items.length > 0;
+  const maxAttempts = hasItems ? 4 : 2;
+  let lastResult = null;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await applyHighlightsInTab(tabId, highlightPayload);
+      lastResult = result;
+
+      const isOk = result?.ok === true;
+      const highlightedCount = Number(result?.highlighted || 0);
+      const shouldRetryMissingEntrypoint = !isOk;
+      const shouldRetryZeroMatches = hasItems && highlightedCount === 0;
+
+      if ((!shouldRetryMissingEntrypoint && !shouldRetryZeroMatches) || attempt === maxAttempts) {
+        return {
+          ...result,
+          attempt,
+          maxAttempts
+        };
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts) {
+        throw error;
+      }
+    }
+
+    await sleep(350 * attempt);
+  }
+
+  if (lastResult) {
+    return {
+      ...lastResult,
+      attempt: maxAttempts,
+      maxAttempts
+    };
+  }
+
+  throw lastError || new Error("Highlight rendering failed.");
+}
+
 async function setDetectionStateInTab(tabId, statePayload) {
   await chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", files: ["dom.js"] });
 
@@ -792,6 +858,8 @@ async function runExtractionForTab(tab) {
     return;
   }
 
+  const stopKeepAlive = startServiceWorkerKeepAlive();
+
   try {
     await setDetectionStateInTab(tab.id, {
       state: "loading",
@@ -809,7 +877,14 @@ async function runExtractionForTab(tab) {
     );
 
     const highlightPayload = HighlightNormalizer.buildHighlightPayloadFromBackend(backendResult, extractedConversation);
-    const highlightingResult = await applyHighlightsInTab(tab.id, highlightPayload);
+    const highlightingResult = await applyHighlightsInTabWithRetry(tab.id, highlightPayload);
+
+    if (!highlightingResult?.ok) {
+      await setDetectionStateInTab(tab.id, {
+        state: "error",
+        message: "Analysis completed, but overlay rendering failed. Click again to retry."
+      });
+    }
 
     const payload = {
       ...extractedConversation,
@@ -831,6 +906,8 @@ async function runExtractionForTab(tab) {
     }
 
     console.error(`[AI Chat Extractor] Extraction failed for platform '${platform}':`, error);
+  } finally {
+    stopKeepAlive();
   }
 }
 

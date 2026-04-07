@@ -93,19 +93,45 @@ class ClaimVerifier:
         if not claims:
             return []
 
-        threshold = self.settings.claim_confidence_threshold
+        threshold = (
+            config.get("claim_threshold", self.settings.claim_confidence_threshold)
+            if config else self.settings.claim_confidence_threshold
+        )
         check_conv = config.get("check_conversation", True) if config else True
         check_docs = config.get("check_documents", True) if config else True
+
+        # These domains are too critical to skip purely based on extractor confidence.
+        always_verify_domains = {
+            ClaimDomain.NUMERICAL_STATISTICAL,
+            ClaimDomain.FINANCE_BUSINESS,
+            ClaimDomain.MEDICAL_HEALTH,
+            ClaimDomain.LEGAL_REGULATORY,
+            ClaimDomain.HISTORICAL,
+            ClaimDomain.NEWS_CURRENT_EVENTS,
+        }
+
+        def should_verify_claim(claim: ExtractedClaim) -> bool:
+            if claim.domain in always_verify_domains:
+                return True
+            if claim.citation_indices:
+                return True
+            if claim.importance >= 0.55:
+                return True
+            return claim.confidence_needs_checking >= threshold
 
         # ── Stage 1: Gather evidence for all claims in parallel ───────
         evidence_tasks = []
         claim_indices = []  # Track which claims are being verified vs skipped
 
         for i, claim in enumerate(claims):
-            if claim.confidence_needs_checking < threshold:
+            if not should_verify_claim(claim):
                 logger.debug(
-                    f"Skipping claim {claim.id}: confidence "
-                    f"{claim.confidence_needs_checking} < {threshold}"
+                    "Skipping claim %s: confidence=%s threshold=%s domain=%s importance=%s",
+                    claim.id,
+                    claim.confidence_needs_checking,
+                    threshold,
+                    claim.domain.value if hasattr(claim.domain, "value") else claim.domain,
+                    claim.importance,
                 )
                 continue
 
@@ -231,7 +257,7 @@ class ClaimVerifier:
 
         results = []
         for i, claim in enumerate(claims):
-            if claim.confidence_needs_checking < threshold:
+            if not should_verify_claim(claim):
                 # Skipped claim
                 results.append(ClaimVerificationResult(
                     claim=claim,
