@@ -3,6 +3,7 @@ LLM API clients for multi-model chat support.
 - Groq
 - NVIDIA NIM
 - OpenRouter
+- Ollama
 """
 
 import logging
@@ -81,6 +82,8 @@ class LLMClient:
 
         if provider in ("groq", "nvidia", "openrouter"):
             return await self._chat_openai_compatible(provider, model_id, message, history)
+        elif provider == "ollama":
+            return await self._chat_ollama(model_id, message, history)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
@@ -103,6 +106,9 @@ class LLMClient:
 
         if provider in ("groq", "nvidia", "openrouter"):
             async for chunk in self._stream_openai_compatible(provider, model_id, message, history):
+                yield chunk
+        elif provider == "ollama":
+            async for chunk in self._stream_ollama(model_id, message, history):
                 yield chunk
 
     # ── OpenAI-Compatible (Groq, NVIDIA NIM, OpenRouter) ──────────────
@@ -157,6 +163,36 @@ class LLMClient:
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+    # ── Ollama  ───────────────────────────────────
+
+    async def _chat_ollama(self, model_id: str, message: str, history: list[dict]) -> str:
+        import ollama as ollama_lib
+
+        messages = [{"role": m["role"], "content": m["content"]} for m in history]
+        messages.append({"role": "user", "content": message})
+
+        response = ollama_lib.chat(
+            model=model_id,
+            messages=messages,
+        )
+        return response["message"]["content"]
+
+    async def _stream_ollama(self, model_id: str, message: str, history: list[dict]):
+        import ollama as ollama_lib
+
+        messages = [{"role": m["role"], "content": m["content"]} for m in history]
+        messages.append({"role": "user", "content": message})
+
+        stream = ollama_lib.chat(
+            model=model_id,
+            messages=messages,
+            stream=True,
+        )
+        for chunk in stream:
+            content = chunk.get("message", {}).get("content", "")
+            if content:
+                yield content
 
 
 # ── Module-level singleton ────────────────────────────────────────────────

@@ -141,23 +141,36 @@ Importance: {claim.importance}/1.0
         if self.client is None:
             return self._fallback_adjudicate(claim, ranked_evidence)
 
-        try:
-            prompt = self._build_prompt(claim, ranked_evidence)
+        prompt = self._build_prompt(claim, ranked_evidence)
+        
+        max_retries = 3
+        base_delay = 1.0  # seconds
 
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0.1,
-                },
-            )
-
-            return self._parse_response(response.text, claim)
-
-        except Exception as e:
-            logger.error(f"Gemini adjudication failed for claim '{claim.id}': {e}")
-            return self._fallback_adjudicate(claim, ranked_evidence)
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config={
+                        "response_mime_type": "application/json",
+                        "temperature": 0.1,
+                    },
+                )
+                return self._parse_response(response.text, claim)
+            except Exception as e:
+                error_msg = str(e)
+                logger.warning(f"Gemini adjudication attempt {attempt + 1}/{max_retries} failed for claim '{claim.id}': {error_msg}")
+                if attempt < max_retries - 1:
+                    # Check if it's a rate limit / 429 error
+                    delay = base_delay * (2 ** attempt)
+                    if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                        # For quotas, sleep a bit longer, can be up to 15-60s
+                        delay = max(delay, 20.0) 
+                    logger.info(f"Retrying in {delay} seconds...")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Gemini adjudication completely failed after {max_retries} attempts.")
+                    return self._fallback_adjudicate(claim, ranked_evidence)
 
     async def adjudicate_batch(
         self,

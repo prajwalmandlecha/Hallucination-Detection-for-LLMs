@@ -295,28 +295,21 @@ class ClaimVerifier:
         4. Direct citation URLs (from extension platform sources)
         """
         tasks = []
-        source_keys = []
-        # NOTE: sources_checked is built *after* asyncio.gather so it only
-        # contains sources whose tasks resolved without raising an exception.
-        # Do NOT append to it here during task scheduling.
+        source_types = []
 
         # 1. Domain-routed sources (APIs + filtered Tavily/Serper)
         tasks.append(self.domain_router.gather_evidence(claim))
-        source_keys.append("domain_router")
-        sources_checked.append(SourceType.WEB_SEARCH)
-        sources_checked.append(SourceType.DIRECT_API)
+        source_types.append([SourceType.WEB_SEARCH, SourceType.DIRECT_API])
 
         # 2. Conversation history — check if context exists
         if check_conv and conversation_history and ner_result:
             tasks.append(self._check_conversation(claim, conversation_history, ner_result))
-            source_keys.append("conversation")
-            sources_checked.append(SourceType.CONVERSATION_HISTORY)
+            source_types.append([SourceType.CONVERSATION_HISTORY])
 
         # 3. Documents — check if docs exist
         if check_docs and document_ids:
             tasks.append(self._check_vector_db(claim, document_ids))
-            source_keys.append("vector_db")
-            sources_checked.append(SourceType.VECTOR_DB)
+            source_types.append([SourceType.VECTOR_DB])
 
         # 4. Direct citation URLs from extension
         if platform_sources and claim.citation_indices:
@@ -332,7 +325,7 @@ class ClaimVerifier:
             for url in set(direct_urls):
                 logger.info(f"Direct citation match for claim {claim.id}: {url}")
                 tasks.append(self.web_searcher.fetch_url_content(url))
-                source_keys.append("direct_citation")
+                source_types.append([SourceType.WEB_SEARCH])
 
         if not tasks:
             return [], []
@@ -342,13 +335,13 @@ class ClaimVerifier:
 
         all_evidence = []
         sources_checked = []
-        for key, result in zip(source_keys, results):
+        for keys, result in zip(source_types, results):
             if isinstance(result, Exception):
-                # Don't add key to sources_checked: it threw, so it never ran properly.
-                logger.error(f"Source check failed for {key.value}: {result}")
+                logger.error(f"Source check failed for {keys}: {result}")
                 continue
-            # Mark this source as checked only after it resolved (even if empty)
-            sources_checked.append(key)
+            
+            sources_checked.extend(keys)
+            
             if isinstance(result, list):
                 all_evidence.extend(result)
             elif result is not None:

@@ -87,13 +87,13 @@ class Settings(BaseSettings):
 
     # ── Claim Extraction ──────────────────────────────────────────────────
     claim_extraction_model: str = Field(
-        default="openai/gpt-oss-120b",
+        default="llama-3.3-70b-versatile",
         description="Primary model for claim extraction",
     )
 
     # ── Pipeline Config ───────────────────────────────────────────────────
     claim_confidence_threshold: float = Field(
-        default=0.1,
+        default=0.3,
         description="Minimum confidence for a claim to be verified",
     )
     web_search_enabled: bool = Field(

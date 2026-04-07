@@ -30,7 +30,7 @@ CLAIM_EXTRACTION_PROMPT = """You are a precise claim extraction system. Your job
 4. For opinion claims: extract them if they are stated as objective fact (e.g., "X is the best") — classify as "opinion_subjective". Skip clearly hedged opinions ("I think", "it's possible").
 5. DO extract: facts, statistics, dates, names, definitions, causal claims, comparisons, scientific assertions, financial data.
 6. Rate the importance of each claim (0-1): how critical is this claim to the overall response?
-7. Rate the confidence that this claim needs checking (0-1): ALL verifiable factual claims should score >= 0.6, even well-known facts. Only trivially obvious claims like greetings ("Hello", "How are you?") should score below 0.3. The purpose is hallucination detection — every factual statement must be verified regardless of how "common knowledge" it seems.
+7. Rate the confidence that this claim needs checking (0-1): how likely is it to be hallucinated?
 8. Suggest which verification sources to check: web_search, conversation_history, vector_db, direct_api.
 9. Suggest specific search queries for web verification.
 10. Extract any numerical citation indices (e.g., [1], [2]) that the AI embedded in the text related to this claim into `citation_indices` (as a list of integers).
@@ -83,7 +83,7 @@ EXTRACTION_PROVIDERS = [
         "name": "groq",
         "base_url": "https://api.groq.com/openai/v1",
         "api_key_field": "groq_api_key",
-        "default_model": "llama-3.3-70b-versatile",
+        "model": "llama-3.3-70b-versatile",
         "description": "Groq Llama 3.3 70B — fastest free option (~500 tok/s)",
     },
     {
@@ -97,7 +97,7 @@ EXTRACTION_PROVIDERS = [
         "name": "openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "api_key_field": "openrouter_api_key",
-        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
         "description": "OpenRouter Llama 3.3 70B — free tier",
     },
 ]
@@ -112,54 +112,22 @@ class ClaimExtractor:
     def __init__(self):
         settings = get_settings()
         self.max_claims = settings.max_claims_per_response
-        requested_model = (settings.claim_extraction_model or "").strip()
-        requested_model_lower = requested_model.lower()
-        prefers_glm = requested_model_lower.startswith("glm") or "glm" in requested_model_lower
-        prefers_groq_openai = requested_model_lower.startswith("openai/gpt-oss") or "gpt-oss-120b" in requested_model_lower
         
         # Find the best available provider (all OpenAI-compatible)
         self.client = None
         self.model_name = None
         self.provider_name = None
 
-        provider_candidates = EXTRACTION_PROVIDERS
-        if prefers_glm:
-            # GLM models are typically available through OpenRouter's OpenAI-compatible endpoint.
-            provider_candidates = sorted(
-                EXTRACTION_PROVIDERS,
-                key=lambda provider: 0 if provider["name"] == "openrouter" else 1,
-            )
-        elif prefers_groq_openai:
-            provider_candidates = sorted(
-                EXTRACTION_PROVIDERS,
-                key=lambda provider: 0 if provider["name"] == "groq" else 1,
-            )
-
-        for provider in provider_candidates:
+        for provider in EXTRACTION_PROVIDERS:
             api_key = getattr(settings, provider["api_key_field"], None)
             if api_key:
                 self.client = AsyncOpenAI(
                     base_url=provider["base_url"],
                     api_key=api_key,
                 )
-                selected_model = requested_model or provider["default_model"]
-
-                # Step 3.5 Flash is configured for NVIDIA NIM in this project.
-                # If NVIDIA is unavailable, fall back to the selected provider default.
-                if requested_model.startswith("stepfun-ai/") and provider["name"] != "nvidia":
-                    logger.warning(
-                        "Requested model '%s' requires NVIDIA NIM; falling back to %s default '%s'.",
-                        requested_model,
-                        provider["name"],
-                        provider["default_model"],
-                    )
-                    selected_model = provider["default_model"]
-
-                self.model_name = selected_model
+                self.model_name = provider["model"]
                 self.provider_name = provider["name"]
-                logger.info(
-                    f"Claim extraction: using {provider['description']} ({self.model_name})"
-                )
+                logger.info(f"Claim extraction: using {provider['description']}")
                 break
 
         # If no OpenAI-compatible provider available
@@ -243,13 +211,6 @@ class ClaimExtractor:
         Works with Groq, NVIDIA NIM, and OpenRouter.
         """
         extra_kwargs = {}
-        request_kwargs = {
-            "model": self.model_name,
-            "messages": [
-                {"role": "system", "content": CLAIM_EXTRACTION_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-        }
         
         # OpenRouter needs extra headers
         if self.provider_name == "openrouter":
@@ -258,24 +219,18 @@ class ClaimExtractor:
                 "X-Title": "AI Hallucination Detector",
             }
 
-        # NVIDIA Qwen settings from NIM chat-completions guidance.
-        if self.provider_name == "nvidia":
-            request_kwargs["temperature"] = 0.60
-            request_kwargs["top_p"] = 0.95
-            request_kwargs["max_tokens"] = 16384
-            extra_kwargs["extra_body"] = {
-                "chat_template_kwargs": {"enable_thinking": True}
-            }
-        else:
-            request_kwargs["temperature"] = 0.1
-            request_kwargs["max_tokens"] = 4096
-            request_kwargs["response_format"] = {"type": "json_object"}
-
         response = await self.client.chat.completions.create(
-            **request_kwargs,
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": CLAIM_EXTRACTION_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.1,
+            max_tokens=4096,
+            response_format={"type": "json_object"},
             **extra_kwargs,
         )
-        return response.choices[0].message.content or ""
+        return response.choices[0].message.content
 
 
     def _parse_response(self, response_text: str) -> list[ExtractedClaim]:
@@ -283,18 +238,11 @@ class ClaimExtractor:
         import re
         try:
             text = response_text.strip()
-
-            # If model returned markdown fenced JSON, extract the fenced payload first.
-            fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
-            if fenced_match:
-                text = fenced_match.group(1).strip()
-
-            # Isolate the first JSON object from conversational prefixes/suffixes.
-            if not text.startswith("{"):
-                start = text.find("{")
-                end = text.rfind("}")
-                if start != -1 and end != -1 and end > start:
-                    text = text[start:end + 1]
+            
+            # Isolate the JSON object from potential markdown wrapping or conversational prefixes
+            match = re.search(r'(\{.*\})', text, re.DOTALL)
+            if match:
+                text = match.group(1)
                 
             # Automatically strip trailing commas (common LLM hallucination) before closing brackets
             text = re.sub(r',\s*([}\]])', r'\1', text)
@@ -314,9 +262,8 @@ class ClaimExtractor:
                         importance=float(item.get("importance", 0.5)),
                         suggested_sources=self._parse_sources(item.get("suggested_sources", [])),
                         search_queries=item.get("search_queries", []),
-                        confidence_needs_checking=max(
-                            float(item.get("confidence_needs_checking", 0.7)),
-                            0.5,  # Floor: never skip a factual claim
+                        confidence_needs_checking=float(
+                            item.get("confidence_needs_checking", 0.5)
                         ),
                         key_entities=item.get("key_entities", []),
                         requires_multi_hop=bool(item.get("requires_multi_hop", False)),
@@ -354,11 +301,6 @@ class ClaimExtractor:
 
     @staticmethod
     def _parse_sources(sources: list) -> list[SourceType]:
-        if isinstance(sources, str):
-            sources = [sources]
-        if not isinstance(sources, list):
-            return []
-
         parsed = []
         for s in sources:
             try:
