@@ -231,6 +231,18 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
 
         const responseText = streamedResponseText;
 
+        // Save AI message before detection so backend can link analytics to this message.
+        let assistantMessageId: string | undefined;
+        if (activeChatId) {
+          try {
+            const savedAssistant = await addMessageToConversation(activeChatId, "assistant", responseText, pane.modelId);
+            assistantMessageId = savedAssistant?.id;
+            console.log(`[ChatContainer] Saved AI message (model: ${pane.modelId}) to conversation ${activeChatId}`);
+          } catch (err) {
+            console.error("Failed to save AI message to DB", err);
+          }
+        }
+
         // Step B: run detection on the response
         const historyWithUser: ChatMessage[] = [
           ...history,
@@ -239,7 +251,14 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
 
         let spans: HallucinationSpan[] | undefined;
         try {
-          const detection = await detectHallucinations(pane.modelId, responseText, historyWithUser, documentIds);
+          const detection = await detectHallucinations(
+            pane.modelId,
+            responseText,
+            historyWithUser,
+            documentIds,
+            activeChatId || undefined,
+            assistantMessageId,
+          );
           spans = detection.claims
             .filter((c) => c.status !== "SKIPPED")
             .map((claim) => ({
@@ -318,16 +337,6 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
           );
         } catch (detErr) {
           console.warn("Detection failed (non-fatal):", detErr);
-        }
-        
-        // Save AI message to DB
-        if (activeChatId) {
-          try {
-            await addMessageToConversation(activeChatId, "assistant", responseText, pane.modelId);
-            console.log(`[ChatContainer] Saved AI message (model: ${pane.modelId}) to conversation ${activeChatId}`);
-          } catch (err) {
-            console.error("Failed to save AI message to DB", err);
-          }
         }
 
         return { paneId: pane.id, success: true };

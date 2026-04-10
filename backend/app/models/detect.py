@@ -157,6 +157,10 @@ class DetectionRequest(BaseModel):
     """
     # ── Common ──
     conversation_id: Optional[str] = Field(None, description="Internal conversation UUID (frontend)")
+    assistant_message_id: Optional[str] = Field(
+        None,
+        description="Assistant message UUID to attach persisted analysis to (frontend)",
+    )
     document_ids: list[str] = Field(
         default_factory=list,
         description="IDs of user-uploaded documents to check against",

@@ -372,9 +372,111 @@ def _build_highlight_claims(verification_results) -> list[HighlightClaim]:
     return highlight_claims
 
 
+async def _persist_single_mode_analysis(
+    request: DetectionRequest,
+    pipeline_result: dict,
+    db: AsyncSession,
+) -> None:
+    """Persist single-mode detection results when a target assistant message is available."""
+    if not request.conversation_id:
+        return
+
+    from sqlalchemy import select
+    from app.db.models import AnalysisResult, ClaimAnalysis, EvidenceItem, Message
+
+    message_query = select(Message).where(
+        Message.conversation_id == request.conversation_id,
+        Message.role == "assistant",
+    )
+
+    if request.assistant_message_id:
+        message_query = message_query.where(Message.id == request.assistant_message_id)
+    else:
+        message_query = message_query.where(Message.analysis_result_id.is_(None))
+        if request.model_response:
+            message_query = message_query.where(Message.content == request.model_response)
+
+    message_query = message_query.order_by(Message.created_at.desc()).limit(1)
+    db_msg = (await db.execute(message_query)).scalar_one_or_none()
+
+    if not db_msg:
+        logger.info(
+            "Single-mode persistence skipped: no target assistant message found for conversation %s",
+            request.conversation_id,
+        )
+        return
+
+    if db_msg.analysis_result_id is not None:
+        return
+
+    warnings_payload = [
+        warning.model_dump() if hasattr(warning, "model_dump") else warning
+        for warning in pipeline_result["warnings"]
+    ]
+
+    ar = AnalysisResult(
+        ai_response_text=request.model_response or "",
+        overall_risk_score=pipeline_result["overall_risk"],
+        risk_level=(
+            pipeline_result["risk_level"].value
+            if hasattr(pipeline_result["risk_level"], "value")
+            else pipeline_result["risk_level"]
+        ),
+        warnings=warnings_payload,
+    )
+    db.add(ar)
+    db_msg.analysis_result = ar
+
+    for claim_res in pipeline_result["verification_results"]:
+        ca = ClaimAnalysis(
+            analysis=ar,
+            claim_text=claim_res.claim.text,
+            claim_type=(
+                claim_res.claim.domain.value
+                if hasattr(claim_res.claim.domain, "value")
+                else claim_res.claim.domain
+            ),
+            domain=(
+                claim_res.claim.domain.value
+                if hasattr(claim_res.claim.domain, "value")
+                else claim_res.claim.domain
+            ),
+            exact_quote=claim_res.claim.exact_quote,
+            importance_score=claim_res.claim.importance,
+            risk_score=claim_res.risk_score,
+            verdict=(
+                claim_res.status.value
+                if hasattr(claim_res.status, "value")
+                else claim_res.status
+            ),
+            confidence=getattr(claim_res, "confidence", None),
+            reasoning=getattr(claim_res, "reasoning", None),
+            suggestion=getattr(claim_res, "suggestion", None),
+        )
+        db.add(ca)
+
+        for ev in claim_res.evidence:
+            db.add(
+                EvidenceItem(
+                    claim_analysis=ca,
+                    source_type=ev.source_type.value if hasattr(ev.source_type, "value") else ev.source_type,
+                    source_tier=ev.source_tier.value if hasattr(ev.source_tier, "value") else ev.source_tier,
+                    source_url=ev.source_url,
+                    source_title=ev.source_title,
+                    snippet=ev.snippet,
+                    nli_verdict=ev.nli_label.value if ev.nli_label else None,
+                    nli_entailment_prob=ev.nli_scores.get("entailment", 0.0) if ev.nli_scores else 0.0,
+                    nli_contradiction_prob=ev.nli_scores.get("contradiction", 0.0) if ev.nli_scores else 0.0,
+                    nli_neutral_prob=ev.nli_scores.get("neutral", 0.0) if ev.nli_scores else 0.0,
+                )
+            )
+
+    await db.commit()
+
+
 # ── Single mode handler ──────────────────────────────────────────────────
 
-async def _detect_single(request: DetectionRequest) -> DetectionResponse:
+async def _detect_single(request: DetectionRequest, db: AsyncSession) -> DetectionResponse:
     """Handle single-response detection (frontend mode)."""
     start_time = time.time()
     response_id = str(uuid.uuid4())
@@ -393,6 +495,16 @@ async def _detect_single(request: DetectionRequest) -> DetectionResponse:
             "check_conversation": request.config.check_conversation,
         },
     )
+
+    try:
+        await _persist_single_mode_analysis(request, pipeline_result, db)
+    except Exception as persist_error:
+        await db.rollback()
+        logger.warning(
+            "Single-mode analysis persistence failed but detection response will continue: %s",
+            persist_error,
+            exc_info=True,
+        )
 
     claims_response = _build_claims_response(pipeline_result["verification_results"])
     processing_time = int((time.time() - start_time) * 1000)
@@ -818,7 +930,7 @@ async def detect_hallucinations(
         if request.is_extension_mode:
             return await _detect_extension(request, db)
         elif request.model_response:
-            return await _detect_single(request)
+            return await _detect_single(request, db)
         else:
             raise HTTPException(
                 status_code=400,

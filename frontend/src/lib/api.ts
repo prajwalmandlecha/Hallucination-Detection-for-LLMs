@@ -117,6 +117,7 @@ export interface DetectionConfig {
 
 export interface DetectionRequest {
   conversation_id?: string;
+  assistant_message_id?: string;
   document_ids?: string[];
   config?: DetectionConfig;
   model_id?: string;
@@ -140,6 +141,38 @@ export interface Conversation {
   metadata: Record<string, any>;
   created_at: string;
   updated_at: string;
+}
+
+export interface AnalyticsSummary {
+  total_analyses: number;
+  total_claims: number;
+  total_hallucinations: number;
+  average_confidence: number;
+}
+
+export interface AnalyticsModelStat {
+  id: string;
+  name: string;
+  confidence: number;
+  hallucinations: number;
+  sources: number;
+  analyses: number;
+  claims: number;
+}
+
+export interface AnalyticsTimelinePoint {
+  date: string;
+  label: string;
+  hallucinations: number;
+  confidence: number;
+}
+
+export interface AnalyticsOverview {
+  days: number;
+  generated_at: string;
+  summary: AnalyticsSummary;
+  models: AnalyticsModelStat[];
+  timeline: AnalyticsTimelinePoint[];
 }
 
 export async function fetchConversations(): Promise<Conversation[]> {
@@ -173,19 +206,25 @@ export async function deleteConversation(id: string): Promise<void> {
   }
 }
 
+export async function fetchAnalyticsOverview(days: number = 7): Promise<AnalyticsOverview> {
+  const res = await fetch(`${API_BASE}/analytics/overview?days=${days}`);
+  if (!res.ok) throw new Error("Failed to fetch analytics overview");
+  return res.json() as Promise<AnalyticsOverview>;
+}
+
 export async function addMessageToConversation(
   convId: string,
   role: "user" | "assistant",
   content: string,
   modelId?: string
-) {
+): Promise<Conversation["messages"][number]> {
   const res = await fetch(`${API_BASE}/conversations/${convId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role, content, model_id: modelId })
   });
   if (!res.ok) throw new Error("Failed to add message");
-  return res.json();
+  return res.json() as Promise<Conversation["messages"][number]>;
 }
 
 /** Fetch all available models from the backend. (MOCKED) */
@@ -335,7 +374,9 @@ export async function detectHallucinations(
   modelId: string,
   modelResponse: string,
   history: ChatMessage[],
-  documentIds: string[] = []
+  documentIds: string[] = [],
+  conversationId?: string,
+  assistantMessageId?: string,
 ): Promise<DetectionResult> {
   const res = await fetch(`${API_BASE}/detect`, {
     method: "POST",
@@ -344,6 +385,8 @@ export async function detectHallucinations(
       model_id: modelId,
       model_response: modelResponse,
       conversation_history: history,
+      conversation_id: conversationId,
+      assistant_message_id: assistantMessageId,
       document_ids: documentIds,
       config: { check_web: true, check_documents: true, check_conversation: true },
     }),
