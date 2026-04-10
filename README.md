@@ -17,15 +17,12 @@ A production-grade system that intercepts AI-generated responses, extracts claim
   - [Step 1: Parallel Extraction](#step-1-parallel-extraction-ner--claim-extraction)
   - [Step 2: Multi-Source Verification](#step-2-multi-source-verification)
   - [Step 3: NLI-Based Claim Verification](#step-3-nli-based-claim-verification)
-  - [Step 4: Risk Score Aggregation](#step-4-risk-score-aggregation)
-  - [Step 5: Output Generation](#step-5-output-generation)
+  - [Step 4: LLM Adjudication](#step-4-llm-adjudication)
   - [API Endpoints](#api-endpoints)
 - [Frontend — Multi-Model Chat Interface](#frontend--multi-model-chat-interface)
 - [Browser Extension](#browser-extension)
 - [Storage Architecture](#storage-architecture)
 - [Supported LLM Models](#supported-llm-models)
-- [Technical Decisions & Rationale](#technical-decisions--rationale)
-- [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
 
 ---
@@ -36,22 +33,20 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 
 1. **Intercepts** any AI response (via our chat frontend or browser extension)
 2. **Extracts** individual factual claims from the response
-3. **Verifies** each claim against multiple sources (conversation history, user documents, web search)
-4. **Scores** hallucination risk at both claim-level and response-level (0–100)
-5. **Displays** results as an overlay with detailed explanations, source links, and warnings
+3. **Verifies** each claim against multiple sources (conversation history, user documents, web search, APIs)
+4. **Scores** hallucination risk at both claim-level and response-level using NLI and LLM Adjudication
+5. **Displays** results with detailed explanations, source links, and warnings
 
 ### What Makes This Different?
 
 | Feature | Our System |
 |---|---|
-| **Multi-source verification** | Checks against conversation history, user documents, AND web search simultaneously |
+| **Multi-source verification** | Checks against conversation history, user documents, specific domains (Arxiv, CrossRef, PubMed, Semantic Scholar) AND web search simultaneously |
 | **Claim-level granularity** | Every individual claim is scored, not just the entire response |
 | **LLM-driven source selection** | The claim extractor intelligently suggests which sources to check per claim |
 | **Source attribution** | Every verification result links back to the actual source (URL, document chunk, conversation turn) |
-| **Model-agnostic** | Works with any LLM — compare hallucination rates across 10+ free models side-by-side |
-| **Dual interface** | Use via browser extension on ChatGPT/Claude/Gemini OR our built-in multi-model chat |
-| **100% free LLM access** | All chat models use free-tier APIs (Groq, NVIDIA NIM, OpenRouter, Ollama) |
-| **GPU-accelerated** | NLI verification runs on local GPU (CUDA) for fast inference |
+| **ZERO-dependency Vectorization** | Runs locally inside the Python process using SentenceTransformers (`all-MiniLM-L6-v2`) — NO Ollama needed |
+| **Hybrid Analysis Pipeline** | Uses fast DeBERTa-v3 NLP for entailment/contradiction math, plus Gemini 3 Flash for intelligent final-adjudication |
 
 ---
 
@@ -80,7 +75,6 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 │                        BACKEND (FastAPI)                                │
 │                                                                         │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │                    API Gateway / Router                          │   │
 │  │    POST /detect  │  POST /chat  │  POST /documents/upload        │   │
 │  └──────────┬───────────────────────────────────────────────────────┘   │
 │             │                                                           │
@@ -90,68 +84,30 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 │  │  ┌─────────────────────┐   ┌──────────────────────────────┐ │        │
 │  │  │  NER Extractor      │   │  Claim Extractor (LLM)       │ │        │
 │  │  │  (spaCy en_core_    │   │  (Groq Llama 3.3 70B)        │ │        │
-│  │  │   web_sm)           │   │  → claims + suggested sources│ │        │
-│  │  │  → flat entities    │   │  + search queries + confidence│ │        │
-│  │  │  → PostgreSQL       │   │                              │ │        │
+│  │  │   web_sm)           │   │                              │ │        │
 │  │  └────────┬────────────┘   └────────────┬─────────────────┘ │        │
 │  └───────────┼─────────────────────────────┼───────────────────┘        │
 │              ▼                             ▼                            │
-│       ┌─────────────┐           ┌─────────────────┐                     │
-│       │ PostgreSQL  │           │  Claims[] with  │                     │
-│       │ (entities)  │           │  source hints & │                     │
-│       └─────────────┘           │  probabilities  │                     │
-│                                 └────────┬────────┘                     │
-│                                          ▼                              │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │        STEP 2: MULTI-SOURCE VERIFICATION (Parallel)         │        │
-│  │               (per claim, all sources in parallel)          │        │
+│  │        STEP 2: MULTI-SOURCE VERIFICATION (Domain Router)    │        │
 │  │                                                             │        │
-│  │  ┌──────────────────┐ ┌────────────────┐ ┌───────────────┐  │        │
-│  │  │ Conversation     │ │ Vector DB      │ │ Web Search    │  │        │
-│  │  │ History          │ │ (User Docs)    │ │ (Tavily API)  │  │        │
-│  │  │                  │ │                │ │               │  │        │
-│  │  │ Match NER        │ │ Semantic       │ │ Search web,   │  │        │
-│  │  │ entities from    │ │ search on      │ │ return        │  │        │
-│  │  │ PostgreSQL to    │ │ pgvector for   │ │ snippets +    │  │        │
-│  │  │ find relevant    │ │ relevant       │ │ SOURCE URLs   │  │        │
-│  │  │ prior messages   │ │ doc chunks     │ │               │  │        │
-│  │  └──────┬───────────┘ └──────┬─────────┘ └──────┬────────┘  │        │
-│  └─────────┼────────────────────┼──────────────────┼───────────┘        │
-│            └──────────┬─────────┘──────────────────┘                    │
-│                       ▼                                                 │
+│  │  ┌────────────────┐ ┌────────────────┐ ┌─────────────────┐  │        │
+│  │  │ Memory (NER)   │ │ Vector DB      │ │ Web / Domain API│  │        │
+│  │  │ Match prior    │ │ ST natively    │ │ Arxiv, PubMed,  │  │        │
+│  │  │ chat history   │ │ pgvector 384d  │ │ Tavily, Serper  │  │        │
+│  │  └──────┬─────────┘ └──────┬─────────┘ └──────┬──────────┘  │        │
+│  └─────────┼──────────────────┼──────────────────┼─────────────┘        │
+│            └─────────┬────────┘──────────────────┘                      │
+│                      ▼                                                  │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │        STEP 3: NLI VERIFICATION (DeBERTa-v3-base on GPU)    │        │
-│  │        For each (claim, evidence) pair → ENTAIL/CONTRA/NEU  │        │
-│  │        Batched inference on CUDA via run_in_executor         │        │
-│  └────────────────────────┬────────────────────────────────────┘        │
-│                           ▼                                             │
+│  │        STEP 3: NLI VERIFICATION (DeBERTa-v3-base)           │        │
+│  │        Scores Entailment, Contradiction, and Neutral        │        │
+│  └───────────────────────────┬─────────────────────────────────┘        │
+│                              ▼                                          │
 │  ┌─────────────────────────────────────────────────────────────┐        │
-│  │        STEP 4: RISK SCORE AGGREGATION                       │        │
-│  │        Per-claim scores → Weighted overall score (0-100)    │        │
-│  └────────────────────────┬────────────────────────────────────┘        │
-│                           ▼                                             │
-│  ┌─────────────────────────────────────────────────────────────┐        │
-│  │        STEP 5: OUTPUT GENERATION                            │        │
-│  │        Risk score + claim details + warnings + source links │        │
+│  │        STEP 4: LLM ADJUDICATION (Gemini 3 Flash)            │        │
+│  │        Generates natural language reasoning and risk levels │        │
 │  └─────────────────────────────────────────────────────────────┘        │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-              │
-              ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        STORAGE LAYER                                    │
-│                                                                         │
-│  ┌──────────────────────────────┐  ┌────────────────────────────────┐   │
-│  │  PostgreSQL                  │  │  pgvector (extension)          │   │
-│  │  (Core relational)          │  │  (Document embeddings)         │   │
-│  │                              │  │                                │   │
-│  │  • conversations             │  │  • document_chunks.embedding   │   │
-│  │  • messages                  │  │    (768d nomic-embed-text)     │   │
-│  │  • documents                 │  │  • L2 distance similarity     │   │
-│  │  • document_chunks           │  │    search                     │   │
-│  │  • extracted_entities (NER)  │  │                                │   │
-│  └──────────────────────────────┘  └────────────────────────────────┘   │
-│                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -160,16 +116,16 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 ## Features
 
 ### 🔍 Core Detection Engine
-- **LLM-powered claim extraction** — Uses Groq Llama 3.3 70B to decompose AI responses into individual verifiable claims with type classification and per-claim source suggestions
-- **Smart source selection** — LLM dynamically recommends which sources (web, documents, conversation) to check per claim; config booleans act as opt-out overrides only
-- **Multi-source parallel verification** — Checks each claim against conversation history, user-uploaded documents, and live web search simultaneously
-- **NLI-based semantic verification** — DeBERTa-v3-base cross-encoder on GPU classifies each (claim, evidence) pair as entailment / contradiction / neutral
-- **Weighted risk score aggregation** — Combines multiple signals (source support, contradictions, coverage, importance, agreement) into a 0–100 score
+- **LLM-powered claim extraction** — Uses Groq Llama 3.3 70B to decompose AI responses into individual verifiable claims
+- **Domain-Specific Verification Router** — Routes claims automatically to highly specific academic endpoints (`Crossref`, `Semantic Scholar`, `Pubmed`, `arXiv`)
+- **Native PGVector Hybrid Search** — Utilizes `all-MiniLM-L6-v2` locally inside Python for 384d chunk embedding, completely free from constraints.
+- **NLI-based semantic verification** — DeBERTa-v3-base cross-encoder classifies each (claim, evidence) pair 
+- **LLM Adjudication** — Resolves edge-cases using Gemini 3 Preview model reasoning capabilities to output an intuitive human-readable justification.
 - **Source-attributed explanations** — Every flagged claim links back to the actual source URL, document chunk, or conversation turn
 
 ### 💬 Multi-Model Chat Interface
 - **Compare up to 3 LLMs side-by-side** — Send one message, get responses from multiple models simultaneously
-- **10+ free models** — Groq, NVIDIA NIM, OpenRouter, and local Ollama — no paid API keys required
+- **10+ free models** — Groq, NVIDIA NIM, OpenRouter — no paid API keys required
 - **Dynamic layout** — Chat window automatically adjusts from 1 to 2 to 3 columns based on selected models
 - **Per-model analysis** — Each response independently analyzed for hallucinations in parallel
 - **Streaming** — Real-time SSE streaming for all model responses
@@ -201,43 +157,14 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 | **NLI Model** | DeBERTa-v3-base (cross-encoder) | 92.38% SNLI accuracy, GPU-accelerated (CUDA 12.4) |
 | **Claim Extraction** | Llama 3.3 70B (via Groq) | Ultra-fast inference, excellent JSON output, free tier |
 | **NER** | spaCy (en_core_web_sm) | Fast, accurate entity extraction |
-| **Embeddings** | nomic-embed-text (via Ollama) | Local, free, 768d vectors |
-| **Web Search** | Tavily API | AI-native, returns source URLs + clean text, RAG-optimized |
-| **Chat LLMs** | Groq / NVIDIA NIM / OpenRouter / Ollama | All free-tier — no paid API keys needed |
+| **Embeddings** | all-MiniLM-L6-v2 (via SentenceTransformers) | Local, free, 384d vectors |
+| **Web Search** | Tavily, Serper, Google Fact Check API, Wikipedia API,etc Domain Specific Search APIs | Domain Specific Knowledge |
+| **Chat LLMs** | Groq / NVIDIA NIM / OpenRouter | All free-tier — no paid API keys needed |
 | **Containerization** | Docker + Docker Compose + NVIDIA Container Toolkit | GPU passthrough, reproducible deployment |
 
 ---
 
 ## Backend — Detection Pipeline
-
-### Pipeline Flow
-
-```
-Request arrives at POST /detect
-│
-├── STEP 1 (PARALLEL):
-│   ├── NER Extraction (spaCy) → flat entities → PostgreSQL (incremental)
-│   └── Claim Extraction (Groq Llama 3.3 70B) → claims[] + suggested_sources + search_queries
-│
-│   ⏳ Wait for both to complete
-│
-├── STEP 2 (PARALLEL, per claim):
-│   ├── Conversation history — always checked if history exists (NER entity match)
-│   ├── Vector DB (pgvector) — always checked if document_ids provided
-│   └── Web search (Tavily) — checked if LLM suggests it for this claim
-│   (config booleans are opt-out overrides, NOT opt-in gates)
-│
-│   ⏳ Wait for all evidence to be retrieved
-│
-├── STEP 3: NLI Verification (GPU)
-│   └── Batch all (claim, evidence) pairs → DeBERTa-v3-base on CUDA → scores
-│
-├── STEP 4: Risk Score Aggregation
-│   └── Per-claim scores → weighted overall score
-│
-└── STEP 5: Output Generation
-    └── Risk score + claim details + warnings + source links → response
-```
 
 ### Step 1: Parallel Extraction (NER + Claim Extraction)
 
@@ -251,187 +178,30 @@ When a request arrives, two operations run **in parallel**:
 - **Duplicates**: If "Einstein" appears in messages #1, #3, and #5 → 3 separate rows, each linked to its source message. The verifier finds all matches and NLI picks the best evidence.
 
 #### 1B. Claim Extraction (LLM-Powered)
-Send the AI response + conversation context to **Groq Llama 3.3 70B** with a structured prompt:
-
-```json
-{
-  "claims": [
-    {
-      "id": "c1",
-      "text": "The Eiffel Tower was built in 1889",
-      "type": "factual",
-      "importance": 0.8,
-      "suggested_sources": ["web_search", "conversation_history"],
-      "search_queries": ["Eiffel Tower construction year"],
-      "confidence_needs_checking": 0.7,
-      "key_entities": ["Eiffel Tower", "1889"]
-    }
-  ]
-}
-```
-
-The LLM intelligently decides which sources to check per claim — factual claims get `web_search`, contextual claims get `conversation_history`, document-referenced claims get `vector_db`.
-
-Claims with `confidence_needs_checking` below a configurable threshold (default: 0.3) are skipped to reduce latency.
-
-**Why Groq Llama 3.3 70B?** Ultra-fast LPU inference (~200-500ms), excellent JSON instruction-following, free tier (30 RPM, 14400 RPD). Smart enough to properly decompose complex responses into atomic claims.
+Send the AI response to **Groq Llama 3.3 70B** to generate atomic claims categorized by domain.
 
 ### Step 2: Multi-Source Verification
+The system utilizes a `DomainSourceRouter` to gather 10-20 pieces of evidence per claim from:
+- Academic endpoints (PubMed, Arxiv, SemanticScholar)
+- Web (Tavily/Serper)
+- Vector DB (user document uploads)
+- Semantic History matches
 
-Each claim is verified against applicable sources **in parallel**. Source selection is **LLM-driven** — the claim extractor's `suggested_sources` field decides which sources to check. Config booleans (`check_web`, `check_documents`, `check_conversation`) only serve as **opt-out overrides**.
-
-| Source | When Checked | What It Returns |
-|---|---|---|
-| **Conversation History** | Always (if history + NER entities exist, unless user disables) | Matching messages containing the same NER entities as the claim |
-| **Vector DB (User Docs)** | Always (if `document_ids` provided, unless user disables) | Semantically similar document chunks via pgvector L2 distance |
-| **Web Search (Tavily)** | When LLM's `suggested_sources` includes `web_search` AND Tavily key available | Search snippets + **source URLs** + page titles |
-
-#### Source Attribution Rules
-Every piece of evidence includes a traceable source reference:
-- **Web Search**: Full URL (e.g., `https://en.wikipedia.org/wiki/Eiffel_Tower`), page title, relevant snippet
-- **User Documents**: Document name, chunk text, chunk position within document
-- **Conversation History**: Message index, speaker (user/AI), relevant excerpted text
 
 ### Step 3: NLI-Based Claim Verification
 
-For each `(claim, evidence)` pair retrieved from the sources, run through the **NLI cross-encoder model** on GPU:
+For each `(claim, evidence)` pair retrieved from the sources, run through the **DeBERTa NLI cross-encoder**:
+- **ENTAILMENT** (0–1) | Evidence supports the claim 
+- **CONTRADICTION** (0–1) | Evidence contradicts the claim
+- **NEUTRAL** (0–1) | Evidence is inconclusive
 
-| NLI Output | Meaning | Impact |
-|---|---|---|
-| **ENTAILMENT** (score 0–1) | Evidence supports the claim | ✅ Reduces risk score |
-| **CONTRADICTION** (score 0–1) | Evidence contradicts the claim | ❌ Increases risk score significantly |
-| **NEUTRAL** (score 0–1) | Evidence is inconclusive | ⚠️ Slightly increases risk score |
 
-**Model: `cross-encoder/nli-deberta-v3-base`**
+### Step 4: LLM Adjudication
 
-| Property | Value |
-|---|---|
-| Architecture | DeBERTa-v3-base (86M params) |
-| SNLI Accuracy | 92.38% |
-| MNLI Accuracy | 90.04% |
-| Device | CUDA (RTX 4050, 6GB VRAM) |
-| PyTorch | 2.6.0+cu124 |
-| VRAM Usage | ~400 MB |
+Raw math is passed into **Gemini 3 Flash Preview** to output an easy-to-understand status:
+`VERIFIED`, `PARTIALLY_VERIFIED`, `CONTRADICTED`, `SKIPPED`.
 
-**Non-Blocking GPU Inference in FastAPI:**
-
-- Model inference runs via `asyncio.run_in_executor()` → offloads to thread pool → event loop stays free
-- GPU operations release the Python GIL during CUDA compute, allowing other async tasks to proceed
-- All (claim, evidence) pairs per request batched into a single forward pass for efficiency
-
-### Step 4: Risk Score Aggregation
-
-#### Per-Claim Risk Score (0–100)
-
-```python
-claim_risk = (
-    w1 * (1 - max_entailment_score)      +   # Source support         (weight: 0.30)
-    w2 * max_contradiction_score          +   # Direct contradictions  (weight: 0.30)
-    w3 * (1 - source_coverage_ratio)      +   # How many sources found (weight: 0.15)
-    w4 * claim_importance                 +   # Claim criticality      (weight: 0.10)
-    w5 * source_agreement_variance        +   # Source disagreement    (weight: 0.10)
-    w6 * (1 - evidence_count_norm)            # Amount of evidence     (weight: 0.05)
-) * 100
-```
-
-#### Overall Response Risk Score (0–100)
-
-```python
-# Weighted average — important claims weigh more
-response_risk = weighted_average(
-    values  = [claim.risk_score for claim in claims],
-    weights = [claim.importance for claim in claims]
-)
-
-# Hard floor: if any claim has a strong contradiction, minimum score is 70
-if any(claim.contradiction_score > 0.9 for claim in claims):
-    response_risk = max(response_risk, 70)
-
-# Boost if many claims are unverifiable
-unverifiable_ratio = count(c for c in claims if c.source_coverage == 0) / len(claims)
-if unverifiable_ratio > 0.5:
-    response_risk = max(response_risk, 60)
-```
-
-#### Risk Levels
-
-| Score | Level | Color | Default Warning Message |
-|---|---|---|---|
-| 0–25 | LOW | 🟢 Green | "Response appears well-grounded" |
-| 26–50 | MODERATE | 🟡 Amber | "Some claims could not be fully verified" |
-| 51–75 | HIGH | 🟠 Orange | "Multiple unverified or questionable claims detected" |
-| 76–100 | CRITICAL | 🔴 Red | "Response contains likely hallucinated content" |
-
-### Step 5: Output Generation
-
-#### Warning Messages
-Generated contextually based on specific claim verification results:
-
-| Trigger | Warning Message |
-|---|---|
-| No evidence found for a claim | "No verifiable source found for: `{claim_text}`" |
-| Evidence contradicts a claim | "Contradicts information from: `{source_reference}`" |
-| Contradicts user's document | "Conflicts with your uploaded document: `{doc_name}`" |
-| Contradicts conversation history | "Contradicts earlier conversation context (message #{n})" |
-| Statistical claim unverified | "Statistical claim could not be verified: `{claim_text}`" |
-| Sources disagree | "Sources disagree on: `{claim_text}` — check linked sources" |
-
-#### Full Response Schema
-
-```json
-{
-  "response_id": "uuid",
-  "overall_risk_score": 72,
-  "risk_level": "HIGH",
-  "risk_color": "#F97316",
-  "warning_message": "Multiple unverified or questionable claims detected",
-  "warnings": [
-    {
-      "type": "no_source",
-      "message": "No verifiable source found for: 'The mortality rate decreased by 47%'",
-      "claim_id": "c3"
-    },
-    {
-      "type": "contradiction",
-      "message": "Contradicts information from: https://who.int/...",
-      "claim_id": "c5",
-      "source_url": "https://who.int/..."
-    }
-  ],
-  "claims": [
-    {
-      "id": "c1",
-      "text": "The Eiffel Tower was built in 1889",
-      "type": "factual",
-      "risk_score": 8,
-      "status": "VERIFIED",
-      "suggested_sources": ["web_search", "conversation_history"],
-      "verification_details": {
-        "entailment_score": 0.96,
-        "contradiction_score": 0.01,
-        "sources_checked": ["web_search", "conversation_history"],
-        "evidence": [
-          {
-            "source_type": "web_search",
-            "source_url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
-            "source_title": "Eiffel Tower - Wikipedia",
-            "snippet": "Construction began on 28 January 1887 and was finished on 15 March 1889.",
-            "nli_label": "ENTAILMENT",
-            "nli_scores": { "entailment": 0.96, "contradiction": 0.01, "neutral": 0.03 }
-          }
-        ]
-      }
-    }
-  ],
-  "metadata": {
-    "processing_time_ms": 1840,
-    "claims_extracted": 7,
-    "claims_verified": 5,
-    "claims_skipped": 2,
-    "sources_queried": ["conversation_history", "vector_db", "web_search"]
-  }
-}
-```
+The adjudicator catches nuanced contradictions, understands temporal shifts, flags subjective hallucination statements masquerading as factual, and provides a conversational `reasoning` and `suggestion` for the frontend.
 
 ### API Endpoints
 
@@ -441,7 +211,7 @@ Generated contextually based on specific claim verification results:
 | `GET` | `/api/v1/models` | List all available LLM models |
 | `POST` | `/api/v1/detect` | Main hallucination detection — accepts AI response + context, returns full analysis |
 | `POST` | `/api/v1/chat` | Proxy to LLM APIs — forwards user message to selected model, supports SSE streaming |
-| `POST` | `/api/v1/documents/upload` | Upload document → chunk → embed (nomic-embed-text via Ollama) → store in pgvector |
+| `POST` | `/api/v1/documents/upload` | Upload document → chunk → natively embed via SentenceTransformers → store in pgvector |
 | `GET` | `/api/v1/documents/{id}` | Get document metadata |
 | `DELETE` | `/api/v1/documents/{id}` | Delete document and its embeddings |
 | `POST` | `/api/v1/conversations` | Create a new conversation context |
@@ -553,71 +323,11 @@ extension/
 
 ## Storage Architecture
 
-### Single PostgreSQL Instance with pgvector
+We use **one PostgreSQL 16 database** with the `pgvector` extension, configured identically for sync and async IO:
 
-We use **one PostgreSQL 16 database** with the `pgvector` extension, avoiding the complexity of separate database systems:
-
-#### Core Tables (PostgreSQL)
-
-```sql
--- Conversations & Messages
-CREATE TABLE conversations (
-    id UUID PRIMARY KEY,
-    title VARCHAR(500),
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE messages (
-    id UUID PRIMARY KEY,
-    conversation_id UUID REFERENCES conversations(id),
-    role VARCHAR(20) NOT NULL,  -- 'user' or 'assistant'
-    content TEXT NOT NULL,
-    model_id VARCHAR(100),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Documents (user uploads)
-CREATE TABLE documents (
-    id UUID PRIMARY KEY,
-    filename VARCHAR(500),
-    content_type VARCHAR(100),
-    uploaded_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE document_chunks (
-    id UUID PRIMARY KEY,
-    document_id UUID REFERENCES documents(id),
-    chunk_index INTEGER,
-    text_content TEXT NOT NULL,
-    embedding vector(768),      -- pgvector: nomic-embed-text produces 768d
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- NER Entities (flat, per-conversation)
-CREATE TABLE extracted_entities (
-    id UUID PRIMARY KEY,
-    conversation_id UUID REFERENCES conversations(id),
-    name VARCHAR(255) NOT NULL,
-    label VARCHAR(100) NOT NULL,  -- PERSON, ORG, GPE, DATE, etc.
-    source_message_id UUID REFERENCES messages(id),
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-#### Vector Search (pgvector)
-
-```sql
--- Enable extension
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- Semantic search: find document chunks similar to a claim
-SELECT id, text_content, document_id
-FROM document_chunks
-WHERE document_id IN ($document_ids)
-ORDER BY embedding <-> $query_embedding  -- L2 distance
-LIMIT 3;
-```
+- `conversations` & `messages`
+- `documents` & `document_chunks` (containing `embedding vector(384)`)
+- `extracted_entities` (for memory search)
 
 **Why pgvector over FAISS/ChromaDB?**
 - **Same database** — no additional infrastructure to deploy/manage
@@ -629,85 +339,16 @@ LIMIT 3;
 
 ## Supported LLM Models
 
-All models use **free-tier APIs** — no paid keys required:
+All supported models utilize **free-tier APIs**:
 
-| Tier | Model | Provider | Free Limits |
-|---|---|---|---|
-| 🥇 **Tier 1** | Llama 3.3 70B | Groq | 30 RPM, 14400 RPD |
-| 🥇 **Tier 1** | Llama 3.1 70B | NVIDIA NIM | 1000 free credits |
-| 🥇 **Tier 1** | Llama 3.3 70B | OpenRouter | 20 RPM, 50 daily |
-| 🥇 **Tier 1** | Nemotron 70B | OpenRouter | 20 RPM, 50 daily |
-| 🥈 **Tier 2** | Llama 3.1 8B | Groq | 30 RPM, ultra-fast |
-| 🥈 **Tier 2** | Gemma 2 9B | Groq | 30 RPM |
-| 🥈 **Tier 2** | Mistral 7B | NVIDIA NIM | 1000 free credits |
-| 🥈 **Tier 2** | Gemini 2.5 Flash | OpenRouter | 20 RPM |
-| 🥉 **Tier 3** | Llama 3.1 8B | Ollama (local) | Unlimited, no internet |
-
-Users can select up to 3 models in the comparison view. The system sends the same message to all selected models, gets their responses, and runs independent hallucination detection on each — revealing which models hallucinate more on the same query.
-
----
-
-## Project Structure
-
-```
-AI_HallicunationDetectionSystem/
-│
-├── README.md
-├── docker-compose.yml               # PostgreSQL + Backend
-│
-├── backend/                         # FastAPI backend
-│   ├── app/
-│   │   ├── __init__.py
-│   │   ├── main.py                  # FastAPI app, startup events, middleware
-│   │   ├── config.py                # Environment config, API keys, model registry
-│   │   │
-│   │   ├── api/                     # Route handlers
-│   │   │   ├── __init__.py
-│   │   │   ├── detect.py            # POST /detect — main hallucination detection
-│   │   │   ├── chat.py              # POST /chat — LLM proxy with SSE streaming
-│   │   │   ├── documents.py         # Document upload, retrieval, deletion
-│   │   │   └── conversations.py     # Conversation CRUD + message management
-│   │   │
-│   │   ├── core/                    # Core detection pipeline
-│   │   │   ├── __init__.py
-│   │   │   ├── claim_extractor.py   # LLM-powered claim extraction (Groq Llama 3.3 70B)
-│   │   │   ├── ner_extractor.py     # Named entity recognition (spaCy en_core_web_sm)
-│   │   │   ├── verifier.py          # Multi-source verification orchestrator
-│   │   │   ├── nli_model.py         # DeBERTa NLI model wrapper + CUDA inference
-│   │   │   ├── risk_scorer.py       # Per-claim + overall risk score + warnings
-│   │   │   ├── web_search.py        # Tavily API integration
-│   │   │   ├── vector_db.py         # pgvector semantic search
-│   │   │   ├── embeddings.py        # Ollama nomic-embed-text client
-│   │   │   └── document_processor.py # Document chunking pipeline
-│   │   │
-│   │   ├── models/                  # Pydantic schemas
-│   │   │   ├── __init__.py
-│   │   │   ├── detect.py            # DetectionRequest/Response, ClaimResult, EvidencePiece
-│   │   │   ├── chat.py              # ChatRequest, ChatResponse
-│   │   │   ├── documents.py         # DocumentResponse
-│   │   │   └── conversations.py     # ConversationCreate, MessageAdd
-│   │   │
-│   │   ├── db/                      # Database layer
-│   │   │   ├── __init__.py
-│   │   │   ├── engine.py            # SQLAlchemy async engine + session factory
-│   │   │   └── models.py            # SQLAlchemy ORM models (all tables)
-│   │   │
-│   │   └── utils/                   # Helpers
-│   │       └── __init__.py
-│   │
-│   ├── tests/                       # Test suite
-│   │   └── run_tests.ps1            # PowerShell API test suite (31 tests)
-│   │
-│   ├── alembic/                     # Database migrations
-│   ├── requirements.txt
-│   ├── Dockerfile                   # NVIDIA CUDA 12.4 + Python 3.13
-│   ├── .dockerignore
-│   └── .env.example
-│
-├── frontend/                        # Next.js chat frontend
-│
-└── extension/                       # Chrome browser extension
-```
+| Tier | Model | Provider |
+|---|---|---|
+| 🥇 | Llama 3.3 70B | Groq |
+| 🥇 | Gemini 3 Flash Preview | Google GenAI |
+| 🥇 | Llama 3.1 70B | NVIDIA NIM |
+| 🥇 | Nemotron 70B | OpenRouter |
+| 🥈 | Llama 3.1 8B | Groq |
+| 🥈 | Gemma 2 9B | Groq |
 
 ---
 
@@ -719,12 +360,12 @@ AI_HallicunationDetectionSystem/
 - **Docker & Docker Compose** (for PostgreSQL)
 - **NVIDIA GPU** with driver ≥ 556.12 (for CUDA 12.4 NLI inference)
 - **NVIDIA Container Toolkit** (for GPU passthrough in Docker)
-- **Ollama** (for local embedding model)
-- **API Keys** (all free):
-  - **Groq** — `console.groq.com` (claim extraction + chat)
-  - **Tavily** — `tavily.com` (web search)
+- **API Keys** :
+  - **Groq** — `console.groq.com` (Claim extraction + chat)
+  - **Tavily / Serper** (Web Search)
   - **NVIDIA NIM** — `build.nvidia.com` (chat)
   - **OpenRouter** — `openrouter.ai` (chat)
+  - **Gemini** — `aistudio.google.com` (Adjudication and Chat)
 
 ### Quick Start
 
@@ -733,33 +374,26 @@ AI_HallicunationDetectionSystem/
 git clone <repo-url>
 cd AI_HallicunationDetectionSystem
 
-# 2. Start infrastructure (PostgreSQL)
+# 2. Start PostgreSQL with pgvector
 docker compose up -d postgres
 
-# 3. Pull the embedding model via Ollama
-ollama pull nomic-embed-text
-
-# 4. Backend setup
+# 3. Backend setup
 cd backend
 python -m venv venv
-venv\Scripts\activate            # Windows
-# source venv/bin/activate       # Linux/Mac
+.\venv\Scripts\Activate.ps1            # Windows
 
-# Install PyTorch with CUDA support
-pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
-# Install remaining dependencies
+# Install Dependencies 
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 
-# 5. Configure environment
+# 4. Configure environment
 cp .env.example .env
-# Edit .env with your free API keys (Groq, Tavily, NVIDIA, OpenRouter)
+# Edit .env with your API keys 
 
-# 6. Run database migrations
+# 5. Run database migrations
 alembic upgrade head
 
-# 7. Start backend
+# 6. Start Backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 # API docs at http://localhost:8000/docs
 ```
@@ -773,28 +407,3 @@ docker compose up --build
 # Backend will be at http://localhost:8000
 # Requires NVIDIA Container Toolkit for GPU passthrough
 ```
-
-### Environment Variables
-
-```env
-# Groq (claim extraction + chat)
-GROQ_API_KEY=your_groq_api_key
-
-# NVIDIA NIM (chat)
-NVIDIA_API_KEY=your_nvidia_api_key
-
-# OpenRouter (chat)
-OPENROUTER_API_KEY=your_openrouter_api_key
-
-# Tavily (web search)
-TAVILY_API_KEY=your_tavily_api_key
-```
-
-### Running Tests
-
-```powershell
-cd backend\tests
-.\run_tests.ps1
-```
-
----

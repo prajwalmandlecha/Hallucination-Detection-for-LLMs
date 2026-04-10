@@ -1,52 +1,53 @@
 """
-Local embedding generation using Ollama.
+Embedding generation using native SentenceTransformers.
 
-We use `nomic-embed-text` (768 dimensions), which runs locally
-and completely free on your hardware.
+We use `all-MiniLM-L6-v2` (384 dimensions), which runs 100% locally 
+inside the python process without requiring external APIs.
 """
 
 import logging
 from typing import List
-import httpx
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
-from app.config import get_settings
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
+# Run CPU-bound embeddings in a thread pool so we don't block asyncio
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="emb-inference")
+
 class EmbeddingPipeline:
     def __init__(self):
-        settings = get_settings()
-        self.base_url = settings.ollama_base_url
-        self.model = settings.embedding_model
+        self.model_name = "all-MiniLM-L6-v2"
+        self._model = None
+        
+    def _load_sync(self):
+        if self._model is None:
+            logger.info(f"Loading embedding model {self.model_name} natively...")
+            self._model = SentenceTransformer(self.model_name)
+            logger.info(f"Native embedding model loaded successfully.")
+
+    def _embed_sync(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        self._load_sync()
+        embeddings = self._model.encode(texts, convert_to_numpy=True)
+        return embeddings.tolist()
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """
-        Generate embeddings for a list of texts using Ollama.
+        Generate embeddings for a list of texts natively via SentenceTransformers.
         """
         if not texts:
             return []
 
-        embeddings = []
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                for text in texts:
-                    # Ollama API: /api/embeddings
-                    response = await client.post(
-                        f"{self.base_url}/api/embeddings",
-                        json={
-                            "model": self.model,
-                            "prompt": text
-                        }
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    embeddings.append(data.get("embedding", []))
-            
-            logger.info(f"Generated {len(embeddings)} embeddings using Ollama ({self.model})")
+            loop = asyncio.get_event_loop()
+            embeddings = await loop.run_in_executor(_executor, self._embed_sync, texts)
             return embeddings
-
         except Exception as e:
-            logger.error(f"Failed to generate embeddings via Ollama: {e}")
+            logger.error(f"Failed to generate embeddings natively: {e}")
             raise
 
 _pipeline = None

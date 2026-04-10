@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime, timezone
 
-from app.models.documents import DocumentUploadResponse
+from app.models.documents import DocumentUploadResponse, DocumentListResponse
 from app.core.document_processor import get_document_processor
 from app.core.embeddings import get_embedding_pipeline
 from app.db.engine import get_db_session
@@ -23,6 +23,9 @@ from app.db.models import Document, DocumentChunk
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+GLOBAL_KB_EXTERNAL_ID = "__global_knowledge_base__"
+GLOBAL_KB_PLATFORM = "knowledge_base"
 
 @router.post("/documents/upload", response_model=DocumentUploadResponse)
 async def upload_document(
@@ -38,11 +41,12 @@ async def upload_document(
     """
     Upload a document for use as a verification source.
     
-    Supports two identification methods:
+    Supports three identification methods:
     - `conversation_id`: Direct internal ID (frontend)
     - `external_conversation_id` + `platform`: External platform ID (extension)
+    - No conversation fields: falls back to the global knowledge base container
     
-    The document is processed: text extracted → chunked → embedded via Ollama → stored in pgvector.
+    The document is processed: text extracted → chunked → embedded via SentenceTransformers natively → stored in pgvector.
     Returns a document_id to include in /detect requests.
     """
     if not file.filename:
@@ -61,8 +65,6 @@ async def upload_document(
         conversation_id = conv.id
         logger.info(f"Resolved {platform}/{external_conversation_id} → {conversation_id}")
 
-    if not conversation_id:
-        raise HTTPException(status_code=400, detail="conversation_id or (external_conversation_id + platform) is required")
 
     content = await file.read()
     if not content:
@@ -165,3 +167,43 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db_session
     await db.commit()
     logger.info(f"Document deleted: {doc_id}")
     return {"status": "deleted", "id": doc_id}
+
+
+@router.get("/documents", response_model=DocumentListResponse)
+async def list_documents(
+    conversation_id: str = None,
+    global_only: bool = False,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    List all documents. If global_only is True, return only documents with no conversation_id.
+    """
+    query = select(Document)
+    if global_only:
+        query = query.where(Document.conversation_id == None)
+    elif conversation_id:
+        query = query.where(Document.conversation_id == conversation_id)
+        
+    result = await db.execute(query)
+    docs = result.scalars().all()
+    
+    # Fast counting for chunks
+    from sqlalchemy import func
+    count_query = select(DocumentChunk.document_id, func.count(DocumentChunk.id)).group_by(DocumentChunk.document_id)
+    count_result = await db.execute(count_query)
+    chunk_counts = {row[0]: row[1] for row in count_result.all()}
+    
+    doc_responses = []
+    for doc in docs:
+        doc_responses.append({
+            "id": doc.id,
+            "conversation_id": doc.conversation_id,
+            "filename": doc.filename,
+            "file_type": doc.content_type,
+            "file_size_bytes": 0,
+            "chunk_count": chunk_counts.get(doc.id, 0),
+            "created_at": doc.uploaded_at
+        })
+        
+    return {"documents": doc_responses, "total": len(doc_responses)}
+

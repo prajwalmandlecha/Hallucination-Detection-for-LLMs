@@ -21,7 +21,7 @@ from app.models.detect import (
     DetectionResponse,
     DetectionMetadata,
     ClaimResultResponse,
-    ClaimType,
+    ClaimDomain,
     ClaimStatus,
     ConversationMessage,
     HighlightClaim,
@@ -56,29 +56,59 @@ def _map_claim_status_from_verdict(verdict: str | None) -> ClaimStatus:
     return ClaimStatus.UNVERIFIED
 
 
-def _map_claim_type(raw_claim_type) -> ClaimType:
-    """Map DB claim type values to ClaimType enum safely."""
-    if isinstance(raw_claim_type, ClaimType):
-        return raw_claim_type
+def _map_claim_domain(raw_claim_domain) -> ClaimDomain:
+    """Map DB claim domain values to ClaimDomain enum safely."""
+    if isinstance(raw_claim_domain, ClaimDomain):
+        return raw_claim_domain
 
-    if raw_claim_type is None:
-        return ClaimType.FACTUAL
+    if raw_claim_domain is None:
+        return ClaimDomain.GENERAL_FACTUAL
 
-    text = str(raw_claim_type).strip()
+    text = str(raw_claim_domain).strip()
     if not text:
-        return ClaimType.FACTUAL
+        return ClaimDomain.GENERAL_FACTUAL
 
-    # Accept enum names (FACTUAL) and enum values (factual)
+    # Accept enum names (GENERAL_FACTUAL) and enum values (general_factual)
     by_name = text.upper()
-    if by_name in ClaimType.__members__:
-        return ClaimType[by_name]
+    if by_name in ClaimDomain.__members__:
+        return ClaimDomain[by_name]
 
     by_value = text.lower()
-    for claim_type in ClaimType:
-        if claim_type.value == by_value:
-            return claim_type
+    for claim_domain in ClaimDomain:
+        if claim_domain.value == by_value:
+            return claim_domain
 
-    return ClaimType.FACTUAL
+    return ClaimDomain.GENERAL_FACTUAL
+
+
+def _normalize_claim_text_for_key(value: str | None) -> str:
+    return " ".join((value or "").split()).strip().lower()
+
+
+def _build_claim_response_dedupe_key(claim_response: ClaimResultResponse) -> str:
+    domain_value = (
+        claim_response.domain.value
+        if hasattr(claim_response.domain, "value")
+        else str(claim_response.domain or "")
+    )
+    text_value = _normalize_claim_text_for_key(
+        claim_response.exact_quote or claim_response.text
+    )
+    return f"{domain_value}::{text_value}"
+
+
+def _build_message_result_key(
+    message_id: str | None,
+    message_index: int | None,
+    assistant_role_index: int | None,
+) -> str | None:
+    if message_id:
+        return f"id:{message_id}"
+    if assistant_role_index is not None:
+        return f"assistant_role_index:{assistant_role_index}"
+    if message_index is not None:
+        return f"message_index:{message_index}"
+    return None
 
 
 # ── Single-message detection (existing pipeline — used by frontend) ──────
@@ -134,7 +164,6 @@ async def _run_detection_pipeline(
 
     # Risk score aggregation
     scorer = get_risk_scorer()
-    verification_results = scorer.score_claims(verification_results)
     overall_risk = scorer.compute_overall_risk(verification_results)
     risk_level = scorer.get_risk_level(overall_risk)
     risk_color = scorer.get_risk_color(risk_level)
@@ -168,6 +197,7 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
             "evidence": [
                 {
                     "source_type": ev.source_type.value,
+                    "source_tier": ev.source_tier.value if hasattr(ev, "source_tier") and ev.source_tier else None,
                     "source_url": ev.source_url,
                     "source_title": ev.source_title,
                     "document_name": ev.document_name,
@@ -181,11 +211,13 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
             ],
         }
 
-        # Build explanation note
+        # Build explanation note prioritizing adjudicator reasoning
         status_text = result.status.value if hasattr(result.status, 'value') else str(result.status)
         note_parts = [f"Status: {status_text}"]
         
-        if result.status == ClaimStatus.UNVERIFIABLE_SOURCE:
+        if result.reasoning:
+            note_parts.append(result.reasoning)
+        elif result.status == ClaimStatus.UNVERIFIABLE_SOURCE:
             note_parts.append("Source link unreachable (e.g. 403 Forbidden). Could not verify.")
         elif result.max_contradiction_score > 0.3:
             note_parts.append(f"Contradiction detected (score: {result.max_contradiction_score:.2f})")
@@ -206,9 +238,12 @@ def _build_claims_response(verification_results) -> list[ClaimResultResponse]:
             id=result.claim.id,
             text=result.claim.text,
             exact_quote=getattr(result.claim, "exact_quote", None),
-            type=result.claim.type,
+            domain=getattr(result.claim, "domain", ClaimDomain.GENERAL_FACTUAL),
             risk_score=result.risk_score,
             status=result.status,
+            confidence=getattr(result, "confidence", 0.0),
+            reasoning=getattr(result, "reasoning", None),
+            suggestion=getattr(result, "suggestion", None),
             suggested_sources=result.claim.suggested_sources,
             note=" | ".join(note_parts),
             citations=citations[:5],
@@ -247,6 +282,7 @@ def _build_claims_response_from_db(analysis_results) -> list[ClaimResultResponse
                 
                 evidences.append({
                     "source_type": ev.source_type,
+                    "source_tier": getattr(ev, "source_tier", None),
                     "source_url": ev.source_url,
                     "source_title": ev.source_title,
                     "document_name": None,
@@ -262,10 +298,12 @@ def _build_claims_response_from_db(analysis_results) -> list[ClaimResultResponse
                 })
             
             note_parts = [f"Status: {status.value}"]
-            if status == ClaimStatus.UNVERIFIABLE_SOURCE:
+            if getattr(claim, "reasoning", None):
+                note_parts.append(claim.reasoning)
+            elif status == ClaimStatus.UNVERIFIABLE_SOURCE:
                 note_parts.append("Source link unreachable.")
             elif status == ClaimStatus.UNVERIFIED:
-                note_parts.append("Could not find strong evidence supporting or contradicting this claim.")
+                note_parts.append("Could not find strong evidence.")
             elif max_contra > 0.3:
                 note_parts.append(f"Contradiction detected (score: {max_contra:.2f})")
             elif max_ent > 0.7:
@@ -282,10 +320,13 @@ def _build_claims_response_from_db(analysis_results) -> list[ClaimResultResponse
             claims_response.append(ClaimResultResponse(
                 id=claim.id,
                 text=claim.claim_text,
-                exact_quote=None,
-                type=_map_claim_type(claim.claim_type),
+                exact_quote=getattr(claim, "exact_quote", None),
+                domain=_map_claim_domain(getattr(claim, "domain", claim.claim_type)),
                 risk_score=claim.risk_score,
                 status=status,
+                confidence=getattr(claim, "confidence", 0.0) or 0.0,
+                reasoning=getattr(claim, "reasoning", None),
+                suggestion=getattr(claim, "suggestion", None),
                 suggested_sources=[],
                 note=" | ".join(note_parts),
                 citations=citations[:5],
@@ -303,9 +344,11 @@ def _build_highlight_claims(verification_results) -> list[HighlightClaim]:
         status_text = result.status.value if hasattr(result.status, 'value') else str(result.status)
         note_parts = [f"Status: {status_text}"]
         
-        if result.max_contradiction_score > 0.3:
+        if hasattr(result, "reasoning") and result.reasoning:
+            note_parts.append(result.reasoning)
+        elif result.max_contradiction_score > 0.3:
             note_parts.append(f"Contradiction detected (score: {result.max_contradiction_score:.2f})")
-        if result.max_entailment_score > 0.7:
+        elif result.max_entailment_score > 0.7:
             note_parts.append(f"Supported by sources (score: {result.max_entailment_score:.2f})")
 
         # Collect citation URLs/names
@@ -321,6 +364,7 @@ def _build_highlight_claims(verification_results) -> list[HighlightClaim]:
         highlight_claims.append(HighlightClaim(
             text=result.claim.text,
             exact_quote=getattr(result.claim, "exact_quote", None),
+            domain=getattr(result.claim, "domain", None),
             score=result.risk_score,
             note=" | ".join(note_parts),
             citations=citations[:5],  # Limit to 5 citations
@@ -328,9 +372,111 @@ def _build_highlight_claims(verification_results) -> list[HighlightClaim]:
     return highlight_claims
 
 
+async def _persist_single_mode_analysis(
+    request: DetectionRequest,
+    pipeline_result: dict,
+    db: AsyncSession,
+) -> None:
+    """Persist single-mode detection results when a target assistant message is available."""
+    if not request.conversation_id:
+        return
+
+    from sqlalchemy import select
+    from app.db.models import AnalysisResult, ClaimAnalysis, EvidenceItem, Message
+
+    message_query = select(Message).where(
+        Message.conversation_id == request.conversation_id,
+        Message.role == "assistant",
+    )
+
+    if request.assistant_message_id:
+        message_query = message_query.where(Message.id == request.assistant_message_id)
+    else:
+        message_query = message_query.where(Message.analysis_result_id.is_(None))
+        if request.model_response:
+            message_query = message_query.where(Message.content == request.model_response)
+
+    message_query = message_query.order_by(Message.created_at.desc()).limit(1)
+    db_msg = (await db.execute(message_query)).scalar_one_or_none()
+
+    if not db_msg:
+        logger.info(
+            "Single-mode persistence skipped: no target assistant message found for conversation %s",
+            request.conversation_id,
+        )
+        return
+
+    if db_msg.analysis_result_id is not None:
+        return
+
+    warnings_payload = [
+        warning.model_dump() if hasattr(warning, "model_dump") else warning
+        for warning in pipeline_result["warnings"]
+    ]
+
+    ar = AnalysisResult(
+        ai_response_text=request.model_response or "",
+        overall_risk_score=pipeline_result["overall_risk"],
+        risk_level=(
+            pipeline_result["risk_level"].value
+            if hasattr(pipeline_result["risk_level"], "value")
+            else pipeline_result["risk_level"]
+        ),
+        warnings=warnings_payload,
+    )
+    db.add(ar)
+    db_msg.analysis_result = ar
+
+    for claim_res in pipeline_result["verification_results"]:
+        ca = ClaimAnalysis(
+            analysis=ar,
+            claim_text=claim_res.claim.text,
+            claim_type=(
+                claim_res.claim.domain.value
+                if hasattr(claim_res.claim.domain, "value")
+                else claim_res.claim.domain
+            ),
+            domain=(
+                claim_res.claim.domain.value
+                if hasattr(claim_res.claim.domain, "value")
+                else claim_res.claim.domain
+            ),
+            exact_quote=claim_res.claim.exact_quote,
+            importance_score=claim_res.claim.importance,
+            risk_score=claim_res.risk_score,
+            verdict=(
+                claim_res.status.value
+                if hasattr(claim_res.status, "value")
+                else claim_res.status
+            ),
+            confidence=getattr(claim_res, "confidence", None),
+            reasoning=getattr(claim_res, "reasoning", None),
+            suggestion=getattr(claim_res, "suggestion", None),
+        )
+        db.add(ca)
+
+        for ev in claim_res.evidence:
+            db.add(
+                EvidenceItem(
+                    claim_analysis=ca,
+                    source_type=ev.source_type.value if hasattr(ev.source_type, "value") else ev.source_type,
+                    source_tier=ev.source_tier.value if hasattr(ev.source_tier, "value") else ev.source_tier,
+                    source_url=ev.source_url,
+                    source_title=ev.source_title,
+                    snippet=ev.snippet,
+                    nli_verdict=ev.nli_label.value if ev.nli_label else None,
+                    nli_entailment_prob=ev.nli_scores.get("entailment", 0.0) if ev.nli_scores else 0.0,
+                    nli_contradiction_prob=ev.nli_scores.get("contradiction", 0.0) if ev.nli_scores else 0.0,
+                    nli_neutral_prob=ev.nli_scores.get("neutral", 0.0) if ev.nli_scores else 0.0,
+                )
+            )
+
+    await db.commit()
+
+
 # ── Single mode handler ──────────────────────────────────────────────────
 
-async def _detect_single(request: DetectionRequest) -> DetectionResponse:
+async def _detect_single(request: DetectionRequest, db: AsyncSession) -> DetectionResponse:
     """Handle single-response detection (frontend mode)."""
     start_time = time.time()
     response_id = str(uuid.uuid4())
@@ -349,6 +495,16 @@ async def _detect_single(request: DetectionRequest) -> DetectionResponse:
             "check_conversation": request.config.check_conversation,
         },
     )
+
+    try:
+        await _persist_single_mode_analysis(request, pipeline_result, db)
+    except Exception as persist_error:
+        await db.rollback()
+        logger.warning(
+            "Single-mode analysis persistence failed but detection response will continue: %s",
+            persist_error,
+            exc_info=True,
+        )
 
     claims_response = _build_claims_response(pipeline_result["verification_results"])
     processing_time = int((time.time() - start_time) * 1000)
@@ -466,7 +622,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
     all_claims_response = []
     all_warnings = []
     message_results = []
-    total_risk_scores = []
+    seen_message_result_keys: set[str] = set()
 
     for assistant_msg in assistant_messages:
         # Build conversation history up to this message
@@ -500,9 +656,8 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
             highlights = _build_highlight_claims(pipeline_result["verification_results"])
             all_claims_response.extend(claims)
             all_warnings.extend(pipeline_result["warnings"])
-            total_risk_scores.append(pipeline_result["overall_risk"])
 
-            message_results.append(MessageDetectionResult(
+            message_result = MessageDetectionResult(
                 messageId=assistant_msg.id,
                 messageIndex=assistant_msg.index,
                 assistantRoleIndex=assistant_msg.roleIndex,
@@ -510,7 +665,16 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                 risk_score=pipeline_result["overall_risk"],
                 risk_level=pipeline_result["risk_level"],
                 claims=highlights,
-            ))
+            )
+            message_result_key = _build_message_result_key(
+                message_result.messageId,
+                message_result.messageIndex,
+                message_result.assistantRoleIndex,
+            )
+            if message_result_key is None or message_result_key not in seen_message_result_keys:
+                if message_result_key is not None:
+                    seen_message_result_keys.add(message_result_key)
+                message_results.append(message_result)
 
             # ── DB Persistence ────────────────────────────────────────────────
             from app.db.models import AnalysisResult, ClaimAnalysis, EvidenceItem, Message
@@ -537,10 +701,15 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                     ca = ClaimAnalysis(
                         analysis=ar,
                         claim_text=claim_res.claim.text,
-                        claim_type=claim_res.claim.type.value if hasattr(claim_res.claim.type, 'value') else claim_res.claim.type,
-                        importance_score=0.5,
+                        claim_type=claim_res.claim.domain.value if hasattr(claim_res.claim.domain, 'value') else claim_res.claim.domain,
+                        domain=claim_res.claim.domain.value if hasattr(claim_res.claim.domain, 'value') else claim_res.claim.domain,
+                        exact_quote=claim_res.claim.exact_quote,
+                        importance_score=claim_res.claim.importance,
                         risk_score=claim_res.risk_score,
-                        verdict=claim_res.status.value if hasattr(claim_res.status, 'value') else claim_res.status
+                        verdict=claim_res.status.value if hasattr(claim_res.status, 'value') else claim_res.status,
+                        confidence=getattr(claim_res, "confidence", None),
+                        reasoning=getattr(claim_res, "reasoning", None),
+                        suggestion=getattr(claim_res, "suggestion", None),
                     )
                     db.add(ca)
                     
@@ -549,6 +718,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                         db.add(EvidenceItem(
                             claim_analysis=ca,
                             source_type=ev.source_type.value if hasattr(ev.source_type, 'value') else ev.source_type,
+                            source_tier=ev.source_tier.value if hasattr(ev.source_tier, 'value') else ev.source_tier,
                             source_url=ev.source_url,
                             source_title=ev.source_title,
                             snippet=ev.snippet,
@@ -569,7 +739,7 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
         except Exception as e:
             logger.error(f"Detection failed for message {assistant_msg.id}: {e}", exc_info=True)
             # Still add an empty result so highlighting doesn't break
-            message_results.append(MessageDetectionResult(
+            message_result = MessageDetectionResult(
                 messageId=assistant_msg.id,
                 messageIndex=assistant_msg.index,
                 assistantRoleIndex=assistant_msg.roleIndex,
@@ -577,7 +747,16 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                 risk_score=0.0,
                 risk_level=RiskLevel.LOW,
                 claims=[],
-            ))
+            )
+            message_result_key = _build_message_result_key(
+                message_result.messageId,
+                message_result.messageIndex,
+                message_result.assistantRoleIndex,
+            )
+            if message_result_key is None or message_result_key not in seen_message_result_keys:
+                if message_result_key is not None:
+                    seen_message_result_keys.add(message_result_key)
+                message_results.append(message_result)
 
     # ── Step 4: Add PAST claims from DB ──────────────────────────────
     from app.db.models import AnalysisResult, Message, ClaimAnalysis
@@ -628,14 +807,15 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
                 
             db_highlight_claims.append(HighlightClaim(
                 text=claim.claim_text,
-                exact_quote=None,
+                exact_quote=getattr(claim, "exact_quote", None),
+                domain=_map_claim_domain(getattr(claim, "domain", claim.claim_type)),
                 score=claim.risk_score,
                 note=" | ".join(note_parts),
                 citations=citations[:5]
             ))
 
         scorer_instance = get_risk_scorer()
-        message_results.append(MessageDetectionResult(
+        message_result = MessageDetectionResult(
             messageId=msg.external_id,
             messageIndex=msg.message_index,
             assistantRoleIndex=msg.role_index,
@@ -643,18 +823,32 @@ async def _detect_extension(request: DetectionRequest, db: AsyncSession) -> Dete
             risk_score=past_analysis.overall_risk_score,
             risk_level=scorer_instance.get_risk_level(past_analysis.overall_risk_score),
             claims=db_highlight_claims
-        ))
+        )
+        message_result_key = _build_message_result_key(
+            message_result.messageId,
+            message_result.messageIndex,
+            message_result.assistantRoleIndex,
+        )
+        if message_result_key is None or message_result_key not in seen_message_result_keys:
+            if message_result_key is not None:
+                seen_message_result_keys.add(message_result_key)
+            message_results.append(message_result)
     
     db_claims_response = _build_claims_response_from_db(past_analyses)
     
     # Merge them into the final response array without duplicating!
-    existing_claim_ids = {c.id for c in all_claims_response}
+    existing_claim_keys = {
+        _build_claim_response_dedupe_key(c) for c in all_claims_response
+    }
     for c in db_claims_response:
-        if c.id not in existing_claim_ids:
-            all_claims_response.append(c)
+        dedupe_key = _build_claim_response_dedupe_key(c)
+        if dedupe_key in existing_claim_keys:
+            continue
+        existing_claim_keys.add(dedupe_key)
+        all_claims_response.append(c)
 
-    # Recompute overall_risk based on ALL analysis_results (both newly processed and past DB)
-    all_scores = [a.overall_risk_score for a in past_analyses] + total_risk_scores
+    # Recompute overall_risk from deduped per-message results.
+    all_scores = [float(result.risk_score) for result in message_results]
     overall_risk = sum(all_scores) / len(all_scores) if all_scores else 0.0
     
     scorer = get_risk_scorer()
@@ -736,7 +930,7 @@ async def detect_hallucinations(
         if request.is_extension_mode:
             return await _detect_extension(request, db)
         elif request.model_response:
-            return await _detect_single(request)
+            return await _detect_single(request, db)
         else:
             raise HTTPException(
                 status_code=400,

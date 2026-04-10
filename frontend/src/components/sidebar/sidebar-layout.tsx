@@ -1,4 +1,4 @@
-import { Plus, Settings, User, Eye, BarChart2 } from "lucide-react";
+import { Plus, Eye, BookKey, BarChart2, Trash2 } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -27,8 +27,8 @@ interface SidebarLayoutProps {
   activeChatId?: string;
   onNewChat: () => void;
   onSelectChat: (id: string) => void;
-  onOpenSettings: () => void;
-  onOpenProfile: () => void;
+  onDeleteChat: (id: string) => void;
+  onOpenKnowledgeBase: () => void;
 }
 
 export function SidebarLayout({
@@ -36,8 +36,8 @@ export function SidebarLayout({
   activeChatId,
   onNewChat,
   onSelectChat,
-  onOpenSettings,
-  onOpenProfile,
+  onDeleteChat,
+  onOpenKnowledgeBase,
 }: SidebarLayoutProps) {
   return (
     <Sidebar variant="sidebar" className="border-r border-subtle bg-pane text-pri font-sans">
@@ -88,18 +88,33 @@ export function SidebarLayout({
               <SidebarMenu>
                 {chats.map((chat) => (
                   <SidebarMenuItem key={chat.id}>
-                    <SidebarMenuButton
-                      asChild
-                      isActive={chat.id === activeChatId}
-                      onClick={() => onSelectChat(chat.id)}
-                      className="px-2.5 py-2.5 h-auto hover:bg-hover data-[active=true]:bg-hover data-[active=true]:shadow-sm rounded-lg transition-all"
-                    >
-                      <SidebarItem
-                        title={chat.title}
-                        snippet={chat.snippet}
-                        riskLevel={chat.riskLevel}
-                      />
-                    </SidebarMenuButton>
+                    <div className="group flex items-start gap-1 rounded-lg hover:bg-hover data-[active=true]:bg-hover transition-all px-1">
+                      <SidebarMenuButton
+                        asChild
+                        isActive={chat.id === activeChatId}
+                        onClick={() => onSelectChat(chat.id)}
+                        className="px-2.5 py-2.5 h-auto flex-1 hover:bg-transparent data-[active=true]:bg-transparent shadow-none rounded-lg transition-all"
+                      >
+                        <SidebarItem
+                          title={chat.title}
+                          snippet={chat.snippet}
+                          riskLevel={chat.riskLevel}
+                        />
+                      </SidebarMenuButton>
+
+                      <button
+                        type="button"
+                        title="Delete session"
+                        className="mt-2 mr-1 opacity-0 group-hover:opacity-100 transition-opacity text-mut hover:text-red-500"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onDeleteChat(chat.id);
+                        }}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>
@@ -110,25 +125,16 @@ export function SidebarLayout({
 
       <SidebarFooter className="p-3">
         <Separator className="bg-border-subtle mb-2 mx-auto" />
-        <SidebarMenu className="flex-row justify-between w-full mt-2">
+        <SidebarMenu className="flex-row justify-center w-full mt-2">
           <SidebarMenuItem>
             <SidebarMenuButton
-              onClick={onOpenProfile}
-              title="Profile"
-              className="w-10 h-10 flex justify-center items-center mx-auto text-mut hover:text-pri"
-            >
-              <User className="w-[16px] h-[16px]" />
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={onOpenSettings}
-              title="Settings"
-              className="w-10 h-10 flex justify-center items-center mx-auto text-mut hover:text-pri"
-            >
-              <Settings className="w-[16px] h-[16px]" />
-            </SidebarMenuButton>
-          </SidebarMenuItem>
+                onClick={onOpenKnowledgeBase}
+                title="Knowledge Base"
+                className="w-10 h-10 flex justify-center items-center mx-auto text-mut hover:text-pri"
+              >
+                <BookKey className="w-[16px] h-[16px]" />
+              </SidebarMenuButton>
+            </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
     </Sidebar>

@@ -18,7 +18,7 @@ import {
 interface ChatLayoutProps {
   panes: ChatPaneData[];
   isThinking?: boolean;
-  onSendMessage: (msg: string) => void;
+  onSendMessage: (msg: string, documentIds: string[]) => void;
   onAddPane: () => void;
   onChangeModel: (paneId: string, newModelId: ModelId) => void;
   onRemovePane: (paneId: string) => void;

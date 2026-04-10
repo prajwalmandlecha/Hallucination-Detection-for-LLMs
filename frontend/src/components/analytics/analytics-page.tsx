@@ -1,29 +1,68 @@
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-
-// Mock data
-const modelStats = [
-  { id: "llama-3.3-70b-versatile", name: "Llama 3.3 70B", confidence: 0.92, hallucinations: 12, sources: 45 },
-  { id: "deepseek-chat", name: "DeepSeek Chat", confidence: 0.88, hallucinations: 18, sources: 32 },
-  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", confidence: 0.95, hallucinations: 5, sources: 60 },
-  { id: "gpt-4-turbo", name: "GPT-4 Turbo", confidence: 0.94, hallucinations: 8, sources: 55 },
-];
-
-const timeData = [
-  { name: "Mon", hallucinations: 4, confidence: 0.91 },
-  { name: "Tue", hallucinations: 3, confidence: 0.92 },
-  { name: "Wed", hallucinations: 7, confidence: 0.89 },
-  { name: "Thu", hallucinations: 2, confidence: 0.95 },
-  { name: "Fri", hallucinations: 5, confidence: 0.93 },
-  { name: "Sat", hallucinations: 1, confidence: 0.96 },
-  { name: "Sun", hallucinations: 8, confidence: 0.88 },
-];
+import {
+  fetchAnalyticsOverview,
+  type AnalyticsModelStat,
+  type AnalyticsOverview,
+} from "@/lib/api";
 
 const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042"];
 
+const EMPTY_SUMMARY = {
+  total_analyses: 0,
+  total_claims: 0,
+  total_hallucinations: 0,
+  average_confidence: 0,
+};
+
+function formatPercent(value: number): string {
+  return `${(Math.max(0, Math.min(1, value)) * 100).toFixed(1)}%`;
+}
+
 export function AnalyticsPage() {
+  const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const loadAnalytics = async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const data = await fetchAnalyticsOverview(7);
+        if (!isCancelled) {
+          setAnalytics(data);
+        }
+      } catch (loadError) {
+        if (!isCancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load analytics.");
+          setAnalytics(null);
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadAnalytics();
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  const summary = analytics?.summary ?? EMPTY_SUMMARY;
+  const modelStats: AnalyticsModelStat[] = analytics?.models ?? [];
+  const timeData = (analytics?.timeline ?? []).map((point) => ({
+    name: point.label,
+    hallucinations: point.hallucinations,
+    confidence: point.confidence,
+  }));
+
   return (
     <div className="relative flex flex-col h-full w-full bg-app overflow-y-auto overflow-x-hidden text-pri p-4 sm:p-8">
       {/* Grid Background */}
@@ -35,14 +74,46 @@ export function AnalyticsPage() {
             backgroundSize: `40px 40px`
           }}
         />
-        <div className="absolute inset-0 bg-app [mask-image:radial-gradient(ellipse_at_center,transparent_20%,black)]"></div>
+        <div className="absolute inset-0 bg-app mask-[radial-gradient(ellipse_at_center,transparent_20%,black)]"></div>
       </div>
 
       <div className="relative z-10 w-full max-w-7xl mx-auto flex flex-col gap-8">
         <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }}>
           <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-pri">Analytics Dashboard</h1>
-          <p className="text-mut mt-2">Monitor model performance, hallucination rates, and confidence scores across the selected models.</p>
+          <p className="text-mut mt-2">Monitor model performance, hallucination rates, and confidence scores across analyzed responses.</p>
+          {analytics?.generated_at && (
+            <p className="text-xs text-mut mt-1">Last updated: {new Date(analytics.generated_at).toLocaleString()}</p>
+          )}
+          {isLoading && <p className="text-xs text-amber-500 mt-2">Loading live analytics...</p>}
+          {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
         </motion.div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <Card className="bg-pane/80 backdrop-blur-md border-subtle">
+            <CardHeader className="pb-2">
+              <CardDescription>Total Analyses</CardDescription>
+              <CardTitle className="text-2xl">{summary.total_analyses}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card className="bg-pane/80 backdrop-blur-md border-subtle">
+            <CardHeader className="pb-2">
+              <CardDescription>Total Claims</CardDescription>
+              <CardTitle className="text-2xl">{summary.total_claims}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card className="bg-pane/80 backdrop-blur-md border-subtle">
+            <CardHeader className="pb-2">
+              <CardDescription>Hallucination Flags</CardDescription>
+              <CardTitle className="text-2xl text-red-500">{summary.total_hallucinations}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card className="bg-pane/80 backdrop-blur-md border-subtle">
+            <CardHeader className="pb-2">
+              <CardDescription>Average Confidence</CardDescription>
+              <CardTitle className="text-2xl">{formatPercent(summary.average_confidence)}</CardTitle>
+            </CardHeader>
+          </Card>
+        </div>
 
         {/* Top Charts Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -59,24 +130,30 @@ export function AnalyticsPage() {
                 <CardTitle>Hallucinations Over Time</CardTitle>
                 <CardDescription>Daily count of detected unsupported claims</CardDescription>
               </CardHeader>
-              <CardContent className="h-[300px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={timeData} margin={{ top: 10, right: 30, left: -20, bottom: 0 }}>
-                    <defs>
-                      <linearGradient id="colorHal" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
-                        <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <XAxis dataKey="name" stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: 'var(--pane)', borderColor: 'var(--border-subtle)', borderRadius: '8px' }}
-                      itemStyle={{ color: 'var(--pri)' }}
-                    />
-                    <Area type="monotone" dataKey="hallucinations" stroke="#ef4444" fillOpacity={1} fill="url(#colorHal)" />
-                  </AreaChart>
-                </ResponsiveContainer>
+              <CardContent className="h-75">
+                {timeData.length === 0 ? (
+                  <div className="h-full w-full flex items-center justify-center text-sm text-mut">
+                    No timeline data yet.
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={timeData} margin={{ top: 10, right: 30, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="colorHal" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <XAxis dataKey="name" stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
+                      <YAxis stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: "var(--pane)", borderColor: "var(--border-subtle)", borderRadius: "8px" }}
+                        itemStyle={{ color: "var(--pri)" }}
+                      />
+                      <Area type="monotone" dataKey="hallucinations" stroke="#ef4444" fillOpacity={1} fill="url(#colorHal)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
               </CardContent>
             </Card>
           </motion.div>
@@ -93,28 +170,34 @@ export function AnalyticsPage() {
                 <CardTitle>Source Usage</CardTitle>
                 <CardDescription>Verified claims by model</CardDescription>
               </CardHeader>
-              <CardContent className="h-[300px] flex items-center justify-center -mt-6">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={modelStats}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={60}
-                      outerRadius={80}
-                      paddingAngle={5}
-                      dataKey="sources"
-                    >
-                      {modelStats.map((_, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip 
-                      contentStyle={{ backgroundColor: 'var(--pane)', borderColor: 'var(--border-subtle)', borderRadius: '8px', color: 'var(--pri)' }}
-                      itemStyle={{ color: 'var(--pri)' }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
+              <CardContent className="h-75 flex items-center justify-center -mt-6">
+                {modelStats.length === 0 ? (
+                  <div className="h-full w-full flex items-center justify-center text-sm text-mut mt-6">
+                    No model analytics yet.
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={modelStats}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={60}
+                        outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="sources"
+                      >
+                        {modelStats.map((_, index) => (
+                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{ backgroundColor: "var(--pane)", borderColor: "var(--border-subtle)", borderRadius: "8px", color: "var(--pri)" }}
+                        itemStyle={{ color: "var(--pri)" }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                )}
               </CardContent>
             </Card>
           </motion.div>
@@ -122,52 +205,58 @@ export function AnalyticsPage() {
 
         {/* Model Cards Bento Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-          {modelStats.map((model, idx) => (
-            <motion.div 
-              key={model.id}
-              className="rounded-xl flex h-full"
-              initial={{ opacity: 0, y: 30 }} 
-              animate={{ opacity: 1, y: 0 }} 
-              transition={{ duration: 0.6, delay: 0.2 + (idx * 0.1) }}
-            >
-              <Card className="flex flex-col flex-1 w-full bg-pane/80 backdrop-blur-md border-subtle shadow-lg hover:shadow-xl hover:-translate-y-1 transition-all duration-300 shadow-black/5 dark:shadow-black/20 group">
-                <CardHeader>
-                  <CardTitle className="text-lg group-hover:text-amber-500 transition-colors">{model.name}</CardTitle>
-                  <CardDescription className="text-xs truncate">{model.id}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-5 flex-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-mut text-sm">Confidence Score</span>
-                    <span className="font-bold text-pri">{(model.confidence * 100).toFixed(1)}%</span>
-                  </div>
-                  <div className="w-full bg-border-subtle rounded-full h-2 overflow-hidden">
-                    <motion.div 
-                      className="bg-amber-500 h-2 rounded-full" 
-                      initial={{ width: 0 }}
-                      animate={{ width: `${model.confidence * 100}%` }}
-                      transition={{ duration: 1, delay: 0.5 + (idx * 0.1) }}
-                    />
-                  </div>
-                  
-                  <div className="grid grid-cols-2 gap-4 mt-6">
-                    <div className="flex flex-col items-center p-3 bg-app/50 rounded-lg border border-subtle/50">
-                      <span className="text-3xl font-black text-red-500 tracking-tighter">{model.hallucinations}</span>
-                      <span className="text-[10px] text-mut uppercase font-semibold mt-1">Hallucinations</span>
+          {modelStats.length === 0 ? (
+            <Card className="sm:col-span-2 lg:col-span-4 bg-pane/80 backdrop-blur-md border-subtle">
+              <CardHeader>
+                <CardTitle>No Analytics Yet</CardTitle>
+                <CardDescription>
+                  Run a few detections from the frontend or browser extension to populate model-level analytics.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          ) : (
+            modelStats.map((model, idx) => (
+              <motion.div
+                key={model.id}
+                className="rounded-xl flex h-full"
+                initial={{ opacity: 0, y: 30 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.6, delay: 0.2 + (idx * 0.1) }}
+              >
+                <Card className="flex flex-col flex-1 w-full bg-pane/80 backdrop-blur-md border-subtle shadow-lg hover:shadow-xl hover:-translate-y-1 transition-all duration-300 shadow-black/5 dark:shadow-black/20 group">
+                  <CardHeader>
+                    <CardTitle className="text-lg group-hover:text-amber-500 transition-colors">{model.name}</CardTitle>
+                    <CardDescription className="text-xs truncate">{model.id}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-5 flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-mut text-sm">Confidence Score</span>
+                      <span className="font-bold text-pri">{formatPercent(model.confidence)}</span>
                     </div>
-                    <div className="flex flex-col items-center p-3 bg-app/50 rounded-lg border border-subtle/50">
-                      <span className="text-3xl font-black text-green-500 tracking-tighter">{model.sources}</span>
-                      <span className="text-[10px] text-mut uppercase font-semibold mt-1">Sources</span>
+                    <div className="w-full bg-border-subtle rounded-full h-2 overflow-hidden">
+                      <motion.div
+                        className="bg-amber-500 h-2 rounded-full"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${Math.max(0, Math.min(100, model.confidence * 100))}%` }}
+                        transition={{ duration: 1, delay: 0.5 + (idx * 0.1) }}
+                      />
                     </div>
-                  </div>
-                </CardContent>
-                <div className="p-4 pt-0 mt-auto">
-                    <Button variant="outline" className="w-full bg-transparent hover:bg-hover border-subtle text-pri hover:text-pri transition-colors">
-                      View More
-                    </Button>
-                </div>
-              </Card>
-            </motion.div>
-          ))}
+
+                    <div className="grid grid-cols-2 gap-4 mt-6">
+                      <div className="flex flex-col items-center p-3 bg-app/50 rounded-lg border border-subtle/50">
+                        <span className="text-3xl font-black text-red-500 tracking-tighter">{model.hallucinations}</span>
+                        <span className="text-[10px] text-mut uppercase font-semibold mt-1">Hallucinations</span>
+                      </div>
+                      <div className="flex flex-col items-center p-3 bg-app/50 rounded-lg border border-subtle/50">
+                        <span className="text-3xl font-black text-green-500 tracking-tighter">{model.sources}</span>
+                        <span className="text-[10px] text-mut uppercase font-semibold mt-1">Sources</span>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </motion.div>
+            ))
+          )}
         </div>
       </div>
     </div>

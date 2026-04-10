@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { SidebarLayout } from "./sidebar-layout";
 import type { RiskLevel } from "./sidebar-item";
-import { fetchConversations, createConversation } from "@/lib/api";
+import { fetchConversations, createConversation, deleteConversation } from "@/lib/api";
+import { KnowledgeBaseModal } from "./knowledge-base-modal";
 
 interface ChatSidebarContainerProps {
   activeChatId: string;
@@ -10,17 +11,24 @@ interface ChatSidebarContainerProps {
 
 export function ChatSidebarContainer({ activeChatId, onChatSelect }: ChatSidebarContainerProps) {
   const [chats, setChats] = useState<Array<{id: string; title: string; snippet: string; riskLevel: RiskLevel}>>([]);
+  const [isKbOpen, setIsKbOpen] = useState(false);
 
   const loadConversations = () => {
     fetchConversations().then((data) => {
-      const formatted = data.map(conv => ({
+      const formatted = data
+      .filter((conv) => conv.platform !== "knowledge_base")
+      .map(conv => ({
         id: conv.id,
         title: conv.metadata?.title || "Session",
         snippet: `Started at ${new Date(conv.created_at).toLocaleDateString()}`,
         riskLevel: "none" as RiskLevel
       }));
+
       setChats(formatted);
-      if (formatted.length > 0 && !activeChatId) {
+      if (
+        formatted.length > 0 &&
+        (!activeChatId || (activeChatId !== "analytics" && !formatted.some((c) => c.id === activeChatId)))
+      ) {
         onChatSelect(formatted[0].id);
       }
     }).catch(err => {
@@ -57,14 +65,37 @@ export function ChatSidebarContainer({ activeChatId, onChatSelect }: ChatSidebar
     onChatSelect(id);
   };
 
+  const handleDeleteChat = async (id: string) => {
+    try {
+      await deleteConversation(id);
+
+      setChats((prev) => {
+        const next = prev.filter((chat) => chat.id !== id);
+        if (activeChatId === id) {
+          if (next.length > 0) {
+            onChatSelect(next[0].id);
+          } else {
+            onChatSelect("");
+          }
+        }
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to delete session from backend", err);
+    }
+  };
+
   return (
-    <SidebarLayout
-      chats={chats}
-      activeChatId={activeChatId}
-      onNewChat={handleNewChat}
-      onSelectChat={handleSelectChat}
-      onOpenProfile={() => console.log("Open profile module...")}
-      onOpenSettings={() => console.log("Open settings module...")}
-    />
+    <>
+      <SidebarLayout
+        chats={chats}
+        activeChatId={activeChatId}
+        onNewChat={handleNewChat}
+        onSelectChat={handleSelectChat}
+        onDeleteChat={handleDeleteChat}
+        onOpenKnowledgeBase={() => setIsKbOpen(true)}
+      />
+      <KnowledgeBaseModal isOpen={isKbOpen} onOpenChange={setIsKbOpen} />
+    </>
   );
 }

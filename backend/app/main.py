@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.api import detect, chat, documents, conversations
+from app.api import analytics, detect, chat, documents, conversations
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -128,6 +128,7 @@ app.include_router(detect.router, prefix="/api/v1", tags=["Detection"])
 app.include_router(chat.router, prefix="/api/v1", tags=["Chat"])
 app.include_router(documents.router, prefix="/api/v1", tags=["Documents"])
 app.include_router(conversations.router, prefix="/api/v1", tags=["Conversations"])
+app.include_router(analytics.router, prefix="/api/v1", tags=["Analytics"])
 
 
 # ── Health Check ──────────────────────────────────────────────────────────
@@ -171,7 +172,6 @@ async def health_check():
                 "groq": settings.groq_api_key is not None,
                 "nvidia": settings.nvidia_api_key is not None,
                 "openrouter": settings.openrouter_api_key is not None,
-                "ollama": True,
             },
         },
         "supported_models": list(settings.supported_models.keys()),

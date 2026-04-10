@@ -31,8 +31,7 @@ spacy>=3.8.0
 # LLM Providers (ALL FREE APIs)
 openai>=1.50.0
 
-# Embedding (Ollama — runs locally)
-ollama>=0.4.0
+
 
 # Document Processing
 pypdf>=5.1.0
@@ -41,3 +40,8 @@ python-docx>=1.1.0
 # Utilities
 numpy>=2.0.0
 uuid6>=2024.7.1
+
+google-genai>=1.0.0            # Gemini 3 Flash SDK (claim adjudication)
+gnews>=0.3.7                   # Google News search (news/current events claims)
+arxiv>=2.1.0                   # arXiv paper search (scientific/technical claims)
+thefuzz>=0.22.1                # Fuzzy string matching for NER improvement

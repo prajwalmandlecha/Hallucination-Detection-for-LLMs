@@ -22,18 +22,14 @@ class Settings(BaseSettings):
     )
 
 
-    # ── Ollama (Local Embeddings + Models) ────────────────────────────────
-    ollama_base_url: str = Field(
-        default="http://localhost:11434",
-        description="Ollama server base URL",
-    )
+    # ── Embeddings (NVIDIA NIM) ────────────────────────────────
     embedding_model: str = Field(
-        default="nomic-embed-text",
-        description="Ollama embedding model name",
+        default="NV-Embed-QA",
+        description="NVIDIA NIM embedding model name",
     )
     embedding_dimensions: int = Field(
-        default=768,
-        description="Embedding vector dimensions",
+        default=1024,
+        description="Embedding vector dimensions for NV-Embed-QA",
     )
 
 
@@ -60,6 +56,23 @@ class Settings(BaseSettings):
     tavily_api_key: Optional[str] = Field(
         default=None,
         description="Tavily API key",
+    )
+    # Serper (domain-filtered Google search)
+    serper_api_key: Optional[str] = Field(
+        default=None,
+        description="Serper.dev API key for domain-filtered web search",
+    )
+
+    # ── Gemini (Claim Adjudication via Google AI Studio) ──────────────────
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Gemini API key from AI Studio (for claim adjudication)",
+    )
+
+    # ── Google Fact Check Tools API ───────────────────────────────────────
+    google_factcheck_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Fact Check Tools API key from GCP Console",
     )
 
     # ── NLI Model ─────────────────────────────────────────────────────────
@@ -92,13 +105,15 @@ class Settings(BaseSettings):
         description="Maximum number of claims to extract per response",
     )
 
-    # ── Risk Score Weights ────────────────────────────────────────────────
-    weight_source_support: float = 0.30
-    weight_contradiction: float = 0.30
-    weight_source_coverage: float = 0.15
-    weight_claim_importance: float = 0.10
-    weight_source_agreement: float = 0.10
-    weight_evidence_count: float = 0.05
+    # ── Evidence Pipeline Settings ────────────────────────────────────────
+    max_evidence_per_claim: int = Field(
+        default=10,
+        description="Max evidence pieces to send to the LLM adjudicator per claim",
+    )
+    min_evidence_informativeness: float = Field(
+        default=0.3,
+        description="Min max(entailment, contradiction) NLI score to include evidence",
+    )
 
     # ── Server ────────────────────────────────────────────────────────────
     host: str = Field(default="0.0.0.0")
@@ -113,8 +128,8 @@ class Settings(BaseSettings):
         Uses 4 providers:
         - Groq
         - NVIDIA NIM  
-        - OpenRouter 
-        - Ollama 
+        - Gemini (Google AI Studio)
+        - OpenRouter
         """
         return {
 
@@ -133,13 +148,6 @@ class Settings(BaseSettings):
                 "api_key_field": "groq_api_key",
                 "description": "Meta's insanely fast small model on Groq",
             },
-            "gemma2-9b-it": {
-                "name": "Gemma 2 9B (Groq)",
-                "provider": "groq",
-                "tier": 2,
-                "api_key_field": "groq_api_key",
-                "description": "Google's open model, very fast on Groq",
-            },
 
             # ── NVIDIA NIM ──────────────────
             "meta/llama-3.1-70b-instruct": {
@@ -156,6 +164,36 @@ class Settings(BaseSettings):
                 "api_key_field": "nvidia_api_key",
                 "description": "Mistral 7B on NVIDIA infrastructure",
             },
+            "google/gemma-2-9b-it": {
+                "name": "Gemma 2 9B (NVIDIA)",
+                "provider": "nvidia",
+                "tier": 2,
+                "api_key_field": "nvidia_api_key",
+                "description": "Google's open model Gemma 2 on NVIDIA NIM",
+            },
+
+            # ── Gemini (Google AI Studio) ─────
+            "gemini-3-flash-preview": {
+                "name": "Gemini 3 Flash Preview",
+                "provider": "gemini",
+                "tier": 1,
+                "api_key_field": "gemini_api_key",
+                "description": "Google's next generation lightweight model",
+            },
+            "gemma-3-27b-it": {
+                "name": "Gemma 3 27B IT",
+                "provider": "gemini",
+                "tier": 2,
+                "api_key_field": "gemini_api_key",
+                "description": "Google's Gemma 3 open model on AI Studio",
+            },
+            "gemma-4-31b-it": {
+                "name": "Gemma 4 31B IT",
+                "provider": "gemini",
+                "tier": 2,
+                "api_key_field": "gemini_api_key",
+                "description": "Google's latest Gemma 4 open model on AI Studio",
+            },
 
             # ── OpenRouter ────────────────────
             "meta-llama/llama-3.3-70b-instruct:free": {
@@ -165,29 +203,7 @@ class Settings(BaseSettings):
                 "api_key_field": "openrouter_api_key",
                 "description": "Meta Llama via OpenRouter free tier",
             },
-            "nvidia/llama-3.1-nemotron-70b-instruct:free": {
-                "name": "Nemotron 70B (OpenRouter)",
-                "provider": "openrouter",
-                "tier": 1,
-                "api_key_field": "openrouter_api_key",
-                "description": "NVIDIA Nemotron via OpenRouter free tier",
-            },
-            "google/gemini-2.5-flash:free": {
-                "name": "Gemini 2.5 Flash (OpenRouter)",
-                "provider": "openrouter",
-                "tier": 2,
-                "api_key_field": "openrouter_api_key",
-                "description": "Google Gemini via OpenRouter free tier",
-            },
 
-            # ── Ollama ───────────────
-            "llama3.1:8b": {
-                "name": "Llama 3.1 8B (Local)",
-                "provider": "ollama",
-                "tier": 3,
-                "api_key_field": None,
-                "description": "Runs locally via Ollama, no internet needed",
-            },
         }
 
     model_config = {

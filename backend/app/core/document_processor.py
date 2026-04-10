@@ -3,8 +3,6 @@ Document processing pipeline.
 
 Handles document upload, text extraction, chunking, and embedding
 for use as a verification source via pgvector.
-
-Phase 2 will add pgvector storage. For now, provides the processing pipeline.
 """
 
 import logging

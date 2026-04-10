@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from app.config import get_settings
 from app.models.detect import (
     ExtractedClaim,
-    ClaimType,
+    ClaimDomain,
     SourceType,
     ConversationMessage,
 )
@@ -26,21 +26,30 @@ CLAIM_EXTRACTION_PROMPT = """You are a precise claim extraction system. Your job
 
 1. Extract each factual claim as a **standalone assertion** that can be verified independently (stored in "text"). 
 2. **CRITICAL**: For every claim, you MUST extract the exact, strictly matching verbal substring from the AI's response that corresponds to this claim (stored in "exact_quote"). This will be used for exact text highlighting in the UI.
-3. Do NOT extract opinions, subjective statements, or hedged language ("might", "could", "it's possible").
-4. DO extract: facts, statistics, dates, names, definitions, causal claims, comparisons.
-5. Classify each claim by type: factual, statistical, temporal, causal, or definition.
+3. Classify each claim by **domain** (see domain list below).
+4. For opinion claims: extract them if they are stated as objective fact (e.g., "X is the best") — classify as "opinion_subjective". Skip clearly hedged opinions ("I think", "it's possible").
+5. DO extract: facts, statistics, dates, names, definitions, causal claims, comparisons, scientific assertions, financial data.
 6. Rate the importance of each claim (0-1): how critical is this claim to the overall response?
 7. Rate the confidence that this claim needs checking (0-1): how likely is it to be hallucinated?
-8. Suggest which verification sources to check: web_search, conversation_history, vector_db.
+8. Suggest which verification sources to check: web_search, conversation_history, vector_db, direct_api.
 9. Suggest specific search queries for web verification.
 10. Extract any numerical citation indices (e.g., [1], [2]) that the AI embedded in the text related to this claim into `citation_indices` (as a list of integers).
 11. List key entities (names, places, organizations, numbers) in each claim.
+12. Set `requires_multi_hop` to true if the claim requires combining information from multiple sources to verify.
 
-## Important Source Suggestion Rules
-- Suggest "web_search" for any factual/statistical/temporal claim about the real world
-- Suggest "conversation_history" if the claim references something discussed earlier
-- Suggest "vector_db" if the claim could be verified against user-uploaded documents
-- A claim can have multiple suggested sources
+## Domain Classification
+
+Classify each claim into ONE of these domains:
+- **general_factual**: Common knowledge, geography, culture (e.g., "The Eiffel Tower is 330m tall")
+- **scientific_technical**: Physics, CS, engineering, biology, chemistry (e.g., "Transformers use self-attention")
+- **medical_health**: Diseases, treatments, drugs, anatomy, nutrition (e.g., "Aspirin reduces heart attack risk by 25%")
+- **numerical_statistical**: Statistics, percentages, measurements, rankings (e.g., "GDP grew 3.2% in Q3 2025")
+- **finance_business**: Companies, stocks, revenue, regulations, crypto (e.g., "Apple's revenue was $394B in FY2023")
+- **legal_regulatory**: Laws, court rulings, regulations, compliance (e.g., "GDPR requires consent for data processing")
+- **news_current_events**: Recent happenings, politics, world events (e.g., "The EU passed the AI Act in March 2024")
+- **historical**: Past events, dates, historical figures (e.g., "The Berlin Wall fell on Nov 9, 1989")
+- **causal_relational**: Cause-effect, correlations, comparisons (e.g., "Smoking causes lung cancer")
+- **opinion_subjective**: Personal views stated as fact (e.g., "Python is the best language for ML")
 
 ## Output Format
 
@@ -50,14 +59,15 @@ Return ONLY valid JSON with this exact structure:
     {
       "id": "c1",
       "text": "The exact factual claim as a standalone assertion",
-      "exact_quote": "The exact verbatim phrase from the original response (e.g. 'Most recent research (2024–2026) focuses on making AI more capable...')",
+      "exact_quote": "The exact verbatim phrase from the original response",
       "citation_indices": [1, 2],
-      "type": "factual",
+      "domain": "medical_health",
       "importance": 0.8,
-      "suggested_sources": ["web_search"],
+      "suggested_sources": ["web_search", "direct_api"],
       "search_queries": ["search query for this claim"],
       "confidence_needs_checking": 0.7,
-      "key_entities": ["Entity1", "Entity2"]
+      "key_entities": ["Entity1", "Entity2"],
+      "requires_multi_hop": false
     }
   ]
 }
@@ -70,18 +80,18 @@ If the response contains no verifiable factual claims, return: {"claims": []}
 
 EXTRACTION_PROVIDERS = [
     {
-        "name": "nvidia",
-        "base_url": "https://integrate.api.nvidia.com/v1",
-        "api_key_field": "nvidia_api_key",
-        "model": "meta/llama-3.1-70b-instruct",
-        "description": "NVIDIA NIM Llama 3.1 70B — 1000 free credits",
-    },
-    {
         "name": "groq",
         "base_url": "https://api.groq.com/openai/v1",
         "api_key_field": "groq_api_key",
         "model": "llama-3.3-70b-versatile",
         "description": "Groq Llama 3.3 70B — fastest free option (~500 tok/s)",
+    },
+    {
+        "name": "nvidia",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "api_key_field": "nvidia_api_key",
+        "model": "meta/llama-3.1-70b-instruct",
+        "description": "NVIDIA NIM Llama 3.1 70B ",
     },
     {
         "name": "openrouter",
@@ -97,14 +107,6 @@ class ClaimExtractor:
     """
     Extracts verifiable claims from AI responses using the best available
     free LLM provider.
-    
-    Priority order: Groq > NVIDIA NIM > OpenRouter > Google Gemini
-    
-    Why this order?
-    - Groq: ~500 tok/s (LPU), 30 RPM free, JSON mode ← fastest
-    - NVIDIA: Good speed, 1000 free credits, reliable
-    - OpenRouter: Free but lower daily limits (50/day)
-    - Google: 15 RPM but uses different SDK (fallback only)
     """
 
     def __init__(self):
@@ -256,7 +258,7 @@ class ClaimExtractor:
                         text=item.get("text", ""),
                         exact_quote=item.get("exact_quote"),
                         citation_indices=item.get("citation_indices", []),
-                        type=self._parse_claim_type(item.get("type", "factual")),
+                        domain=self._parse_claim_domain(item.get("domain", "general_factual")),
                         importance=float(item.get("importance", 0.5)),
                         suggested_sources=self._parse_sources(item.get("suggested_sources", [])),
                         search_queries=item.get("search_queries", []),
@@ -264,6 +266,7 @@ class ClaimExtractor:
                             item.get("confidence_needs_checking", 0.5)
                         ),
                         key_entities=item.get("key_entities", []),
+                        requires_multi_hop=bool(item.get("requires_multi_hop", False)),
                     )
                     if claim.text:
                         claims.append(claim)
@@ -279,11 +282,22 @@ class ClaimExtractor:
             return []
 
     @staticmethod
-    def _parse_claim_type(type_str: str) -> ClaimType:
+    def _parse_claim_domain(domain_str: str) -> ClaimDomain:
+        """Parse domain string to ClaimDomain enum, with fallback mapping from old types."""
+        # Direct match
         try:
-            return ClaimType(type_str.lower())
+            return ClaimDomain(domain_str.lower())
         except ValueError:
-            return ClaimType.FACTUAL
+            pass
+        # Map old ClaimType values to new ClaimDomain
+        old_type_map = {
+            "factual": ClaimDomain.GENERAL_FACTUAL,
+            "statistical": ClaimDomain.NUMERICAL_STATISTICAL,
+            "temporal": ClaimDomain.HISTORICAL,
+            "causal": ClaimDomain.CAUSAL_RELATIONAL,
+            "definition": ClaimDomain.GENERAL_FACTUAL,
+        }
+        return old_type_map.get(domain_str.lower(), ClaimDomain.GENERAL_FACTUAL)
 
     @staticmethod
     def _parse_sources(sources: list) -> list[SourceType]:
