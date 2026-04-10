@@ -3,7 +3,7 @@ import { ChatLayout } from "./chat-layout";
 import type { MessageProps, HallucinationSpan } from "./chat-message-bubble";
 import {
   fetchModels,
-  sendChatMessage,
+  sendChatMessageStream,
   detectHallucinations,
   scoreToRisk,
   getConversation,
@@ -65,24 +65,48 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
         return;
       }
 
-      // If we have messages, we only support a single unified thread loaded right now 
-      // (Advanced branching logic would be needed to reconstruct multiple panes from db history)
-      // For now, load history into a single pane
-      const mappedMessages = conv.messages.map(m => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        spans: [] // Not persisted in DB right now, would need analysis matching
-      }));
-      
-      const lastAssitantMsg = conv.messages.filter(m => m.role === "assistant").pop();
+      // Rebuild per-model panes from persisted messages.
+      const assistantModelsInOrder = Array.from(
+        new Set(
+          conv.messages
+            .filter((m) => m.role === "assistant" && !!m.model_id)
+            .map((m) => m.model_id as string)
+        )
+      ).slice(0, 3);
 
-      setPanes([{ 
-        id: `pane-root-${Date.now()}`, 
-        modelId: lastAssitantMsg?.model_id || firstModel, 
-        messages: mappedMessages 
-      }]);
+      const paneModelIds = assistantModelsInOrder.length > 0 ? assistantModelsInOrder : [firstModel];
+      const messagesByModel = new Map<string, MessageProps[]>();
+      paneModelIds.forEach((id) => messagesByModel.set(id, []));
+
+      conv.messages.forEach((m) => {
+        const mapped = {
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          spans: [],
+        } as MessageProps;
+
+        if (m.role === "user") {
+          paneModelIds.forEach((modelId) => {
+            const list = messagesByModel.get(modelId);
+            if (list) list.push(mapped);
+          });
+          return;
+        }
+
+        const targetModelId = m.model_id && messagesByModel.has(m.model_id) ? m.model_id : paneModelIds[0];
+        const list = messagesByModel.get(targetModelId);
+        if (list) list.push(mapped);
+      });
+
+      const rebuiltPanes: ChatPaneData[] = paneModelIds.map((modelId, index) => ({
+        id: `pane-restored-${modelId}-${index}-${Date.now()}`,
+        modelId,
+        messages: messagesByModel.get(modelId) ?? [],
+      }));
+
+      setPanes(rebuiltPanes);
       setIsModelSelectionLocked(true); // Locked if history exists
       setIsThinking(false);
       setError(null);
@@ -121,7 +145,7 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
   };
 
   // ── Send message → chat → detect ────────────────────────────────────────
-  const handleSendMessage = async (content: string) => {
+  const handleSendMessage = async (content: string, documentIds: string[] = []) => {
     setIsModelSelectionLocked(true);
 
     const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -161,9 +185,51 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
+      const aiMsgId = `ai-${pane.id}-${Date.now()}`;
+      const aiTimestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+      // Pre-add empty AI message to pane
+      setPanes((prev) =>
+        prev.map((p) => {
+          if (p.id !== pane.id) return p;
+          return {
+            ...p,
+            messages: [
+              ...p.messages,
+              {
+                id: aiMsgId,
+                role: "assistant" as const,
+                content: "",
+                timestamp: aiTimestamp,
+              },
+            ],
+          };
+        })
+      );
+
       try {
-        // Step A: get chat response
-        const responseText = await sendChatMessage(pane.modelId, content, history);
+        // Step A: stream chat response
+        let streamedResponseText = "";
+        
+        await sendChatMessageStream(pane.modelId, content, history, (chunk) => {
+          // Replace \n, etc if data was JSON encoded, but if backend just returned string chunk:
+          const unescapedChunk = chunk.replace(/\\n/g, "\n");
+          streamedResponseText += unescapedChunk;
+          
+          setPanes((prev) =>
+            prev.map((p) => {
+              if (p.id !== pane.id) return p;
+              return {
+                ...p,
+                messages: p.messages.map(m => 
+                  m.id === aiMsgId ? { ...m, content: streamedResponseText } : m
+                ),
+              };
+            })
+          );
+        });
+
+        const responseText = streamedResponseText;
 
         // Step B: run detection on the response
         const historyWithUser: ChatMessage[] = [
@@ -173,23 +239,83 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
 
         let spans: HallucinationSpan[] | undefined;
         try {
-          const detection = await detectHallucinations(pane.modelId, responseText, historyWithUser);
+          const detection = await detectHallucinations(pane.modelId, responseText, historyWithUser, documentIds);
           spans = detection.claims
             .filter((c) => c.status !== "SKIPPED")
             .map((claim) => ({
-              text: claim.text,
-              risk: scoreToRisk(claim.risk_score),
-              score: claim.risk_score,
-              status: claim.status,
-              claimType: claim.type,
               claimId: claim.id,
-              citations: (claim.verification_details?.evidence || [])
-                .map((evidence) => evidence.source_title || evidence.source_url || evidence.source_type)
-                .filter(Boolean)
-                .slice(0, 4),
-              explanation: claim.verification_details.evidence[0]?.snippet
-                ?? "Backend did not return evidence snippet for this claim yet.",
+              text: claim.text,
+              exactQuote: claim.exact_quote,
+              domain: claim.domain,
+              status: claim.status,
+              confidence: claim.confidence,
+              riskScore: claim.risk_score,
+              risk: scoreToRisk(claim.risk_score),
+              reasoning: claim.reasoning,
+              suggestion: claim.suggestion,
+              suggestedSources: claim.suggested_sources,
+              note: claim.note,
+              citations: claim.citations,
+              verificationDetails: {
+                entailmentScore: claim.verification_details?.entailment_score,
+                contradictionScore: claim.verification_details?.contradiction_score,
+                neutralScore: claim.verification_details?.neutral_score,
+                sourceCoverage: claim.verification_details?.source_coverage,
+                sourceAgreementVariance: claim.verification_details?.source_agreement_variance,
+                sourcesChecked: claim.verification_details?.sources_checked ?? [],
+                evidence: (claim.verification_details?.evidence ?? []).map((evidence) => ({
+                  sourceType: evidence.source_type,
+                  sourceTier: evidence.source_tier,
+                  sourceUrl: evidence.source_url,
+                  sourceTitle: evidence.source_title,
+                  documentName: evidence.document_name,
+                  chunkIndex: evidence.chunk_index,
+                  messageIndex: evidence.message_index,
+                  snippet: evidence.snippet,
+                  nliLabel: evidence.nli_label,
+                  nliScores: evidence.nli_scores ?? undefined,
+                })),
+              },
             }));
+
+          const detectionSummary = {
+            responseId: detection.response_id,
+            overallRiskScore: detection.overall_risk_score,
+            riskLevel: detection.risk_level,
+            riskColor: detection.risk_color,
+            warningMessage: detection.warning_message,
+            warnings: detection.warnings.map((warning) => ({
+              type: warning.type,
+              message: warning.message,
+              claimId: warning.claim_id,
+              sourceUrl: warning.source_url,
+            })),
+            metadata: detection.metadata
+              ? {
+                  processingTimeMs: detection.metadata.processing_time_ms,
+                  claimsExtracted: detection.metadata.claims_extracted,
+                  claimsVerified: detection.metadata.claims_verified,
+                  claimsSkipped: detection.metadata.claims_skipped,
+                  sourcesQueried: detection.metadata.sources_queried,
+                  platform: detection.metadata.platform,
+                  conversationId: detection.metadata.conversation_id,
+                }
+              : undefined,
+            resultsPresent: Array.isArray(detection.results) && detection.results.length > 0,
+          };
+            
+          // Update pane with hallucination spans
+          setPanes((prev) =>
+            prev.map((p) => {
+              if (p.id !== pane.id) return p;
+              return {
+                ...p,
+                messages: p.messages.map(m => 
+                  m.id === aiMsgId ? { ...m, spans, detectionSummary } : m
+                ),
+              };
+            })
+          );
         } catch (detErr) {
           console.warn("Detection failed (non-fatal):", detErr);
         }
@@ -204,37 +330,30 @@ export function ChatContainer({ activeChatId }: ChatContainerProps) {
           }
         }
 
-        return { paneId: pane.id, responseText, spans };
+        return { paneId: pane.id, success: true };
       } catch (chatErr) {
         const msg = chatErr instanceof Error ? chatErr.message : String(chatErr);
-        return { paneId: pane.id, responseText: `⚠️ Error: ${msg}`, spans: undefined };
+        
+        setPanes((prev) =>
+            prev.map((p) => {
+              if (p.id !== pane.id) return p;
+              return {
+                ...p,
+                messages: p.messages.map(m => 
+                  m.id === aiMsgId ? { ...m, content: `⚠️ Error: ${msg}` } : m
+                ),
+              };
+            })
+        );
+        return { paneId: pane.id, success: false };
       }
     });
 
-    // 3. As each pane resolves, append its AI message
+    // 3. As each pane resolves, decrement pending loader
     let pendingCount = paneRequests.length;
-    const aiTimestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
     paneRequests.forEach((req) => {
-      req.then(({ paneId, responseText, spans }) => {
-        setPanes((currentPanes) =>
-          currentPanes.map((p) => {
-            if (p.id !== paneId) return p;
-            return {
-              ...p,
-              messages: [
-                ...p.messages,
-                {
-                  id: `ai-${paneId}-${Date.now()}`,
-                  role: "assistant" as const,
-                  content: responseText,
-                  spans,
-                  timestamp: aiTimestamp,
-                },
-              ],
-            };
-          })
-        );
+      req.then(() => {
         pendingCount -= 1;
         if (pendingCount === 0) setIsThinking(false);
       });

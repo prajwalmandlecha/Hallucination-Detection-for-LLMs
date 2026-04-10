@@ -33,6 +33,7 @@ export function ChatMessageList({ messages, compactMode }: ChatMessageListProps)
                   role={msg.role}
                   content={msg.content}
                   spans={msg.spans}
+                  detectionSummary={msg.detectionSummary}
                   timestamp={msg.timestamp}
                   compactMode={compactMode}
                 />
