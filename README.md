@@ -125,7 +125,7 @@ Large Language Models (LLMs) frequently generate confident-sounding but factuall
 
 ### 💬 Multi-Model Chat Interface
 - **Compare up to 3 LLMs side-by-side** — Send one message, get responses from multiple models simultaneously
-- **10+ free models** — Groq, NVIDIA NIM, OpenRouter, and local Ollama — no paid API keys required
+- **10+ free models** — Groq, NVIDIA NIM, OpenRouter — no paid API keys required
 - **Dynamic layout** — Chat window automatically adjusts from 1 to 2 to 3 columns based on selected models
 - **Per-model analysis** — Each response independently analyzed for hallucinations in parallel
 - **Streaming** — Real-time SSE streaming for all model responses

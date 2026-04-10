@@ -128,7 +128,8 @@ class Settings(BaseSettings):
         Uses 4 providers:
         - Groq
         - NVIDIA NIM  
-        - OpenRouter 
+        - Gemini (Google AI Studio)
+        - OpenRouter
         """
         return {
 
@@ -147,13 +148,6 @@ class Settings(BaseSettings):
                 "api_key_field": "groq_api_key",
                 "description": "Meta's insanely fast small model on Groq",
             },
-            "gemma2-9b-it": {
-                "name": "Gemma 2 9B (Groq)",
-                "provider": "groq",
-                "tier": 2,
-                "api_key_field": "groq_api_key",
-                "description": "Google's open model, very fast on Groq",
-            },
 
             # ── NVIDIA NIM ──────────────────
             "meta/llama-3.1-70b-instruct": {
@@ -170,6 +164,36 @@ class Settings(BaseSettings):
                 "api_key_field": "nvidia_api_key",
                 "description": "Mistral 7B on NVIDIA infrastructure",
             },
+            "google/gemma-2-9b-it": {
+                "name": "Gemma 2 9B (NVIDIA)",
+                "provider": "nvidia",
+                "tier": 2,
+                "api_key_field": "nvidia_api_key",
+                "description": "Google's open model Gemma 2 on NVIDIA NIM",
+            },
+
+            # ── Gemini (Google AI Studio) ─────
+            "gemini-3-flash-preview": {
+                "name": "Gemini 3 Flash Preview",
+                "provider": "gemini",
+                "tier": 1,
+                "api_key_field": "gemini_api_key",
+                "description": "Google's next generation lightweight model",
+            },
+            "gemma-3-27b-it": {
+                "name": "Gemma 3 27B IT",
+                "provider": "gemini",
+                "tier": 2,
+                "api_key_field": "gemini_api_key",
+                "description": "Google's Gemma 3 open model on AI Studio",
+            },
+            "gemma-4-31b-it": {
+                "name": "Gemma 4 31B IT",
+                "provider": "gemini",
+                "tier": 2,
+                "api_key_field": "gemini_api_key",
+                "description": "Google's latest Gemma 4 open model on AI Studio",
+            },
 
             # ── OpenRouter ────────────────────
             "meta-llama/llama-3.3-70b-instruct:free": {
@@ -179,15 +203,6 @@ class Settings(BaseSettings):
                 "api_key_field": "openrouter_api_key",
                 "description": "Meta Llama via OpenRouter free tier",
             },
-            "nvidia/llama-3.1-nemotron-70b-instruct:free": {
-                "name": "Nemotron 70B (OpenRouter)",
-                "provider": "openrouter",
-                "tier": 1,
-                "api_key_field": "openrouter_api_key",
-                "description": "NVIDIA Nemotron via OpenRouter free tier",
-            },
-
-
 
         }
 

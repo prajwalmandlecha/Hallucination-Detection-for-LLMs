@@ -4,6 +4,7 @@ Conversation management API endpoints.
 POST /api/v1/conversations           — Create a new conversation
 GET  /api/v1/conversations           — List all conversations
 GET  /api/v1/conversations/{id}      — Get conversation with messages
+DELETE /api/v1/conversations/{id}    — Delete conversation with related records
 POST /api/v1/conversations/{id}/messages — Add a message
 POST /api/v1/conversations/sync      — Sync from external platform (extension/API)
 
@@ -16,7 +17,7 @@ from typing import List # Added for list type hint
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, delete
 from sqlalchemy.orm import selectinload
 
 from app.models.conversations import (
@@ -28,7 +29,7 @@ from app.models.conversations import (
     ConversationSyncResponse,
 )
 from app.db.engine import get_db_session
-from app.db.models import Conversation, Message, Document
+from app.db.models import Conversation, Message, Document, AnalysisResult
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,10 @@ async def list_conversations(
         response_conversations.append(
             ConversationResponse(
                 id=conv.id,
+                external_id=conv.external_id,
+                platform=conv.platform,
+                title=conv.title,
+                external_url=conv.external_url,
                 messages=[], # Messages are not loaded for the list view
                 metadata=conv.metadata_json,
                 created_at=conv.created_at,
@@ -330,6 +335,45 @@ async def add_message(
         model_id=db_msg.model_id,
         created_at=db_msg.created_at,
     )
+
+
+@router.delete("/conversations/{conv_id}")
+async def delete_conversation(
+    conv_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Delete a conversation and related records safely."""
+    query = select(Conversation).where(Conversation.id == conv_id)
+    result = await db.execute(query)
+    conv = result.scalar_one_or_none()
+
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Collect linked analysis ids before deleting messages/conversation.
+    analysis_id_rows = await db.execute(
+        select(Message.analysis_result_id).where(
+            Message.conversation_id == conv_id,
+            Message.analysis_result_id.is_not(None),
+        )
+    )
+    analysis_ids = {row[0] for row in analysis_id_rows.fetchall() if row[0]}
+
+    if analysis_ids:
+        # Remove orphanable analysis rows first; cascades will remove claims/evidence.
+        await db.execute(
+            delete(AnalysisResult).where(AnalysisResult.id.in_(analysis_ids))
+        )
+
+    await db.delete(conv)
+    await db.commit()
+
+    logger.info(f"Conversation deleted: {conv_id} (analysis_records={len(analysis_ids)})")
+    return {
+        "status": "deleted",
+        "conversation_id": conv_id,
+        "analysis_records_deleted": len(analysis_ids),
+    }
 
 
 @router.post("/conversations/sync", response_model=ConversationSyncResponse)

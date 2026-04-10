@@ -171,7 +171,6 @@ async def health_check():
                 "groq": settings.groq_api_key is not None,
                 "nvidia": settings.nvidia_api_key is not None,
                 "openrouter": settings.openrouter_api_key is not None,
-                "ollama": True,
             },
         },
         "supported_models": list(settings.supported_models.keys()),
